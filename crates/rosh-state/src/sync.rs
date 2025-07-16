@@ -3,75 +3,13 @@
 //! Manages sequence numbers, acknowledgments, and state updates between client and server
 
 use crate::{StateError, diff::StateDiff, compress::{Compressor, CompressionAlgorithm}};
-use rkyv::{Archive, Deserialize, Serialize};
+use rosh_terminal::TerminalState;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Maximum number of unacknowledged states to keep
 const MAX_PENDING_STATES: usize = 100;
-
-/// Terminal state that can be synchronized
-#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
-#[archive(check_bytes)]
-pub struct TerminalState {
-    /// Terminal dimensions
-    pub width: u16,
-    pub height: u16,
-    
-    /// Screen content (flattened 2D array)
-    pub screen: Vec<u8>,
-    
-    /// Cursor position
-    pub cursor_x: u16,
-    pub cursor_y: u16,
-    
-    /// Cursor visibility
-    pub cursor_visible: bool,
-    
-    /// Terminal title
-    pub title: String,
-    
-    /// Scrollback buffer
-    pub scrollback: Vec<Vec<u8>>,
-    
-    /// Terminal attributes (colors, styles, etc.)
-    pub attributes: Vec<u8>,
-}
-
-impl TerminalState {
-    /// Create a new terminal state
-    pub fn new(width: u16, height: u16) -> Self {
-        let screen_size = (width as usize) * (height as usize);
-        Self {
-            width,
-            height,
-            screen: vec![b' '; screen_size],
-            cursor_x: 0,
-            cursor_y: 0,
-            cursor_visible: true,
-            title: String::new(),
-            scrollback: Vec::new(),
-            attributes: vec![0; screen_size],
-        }
-    }
-    
-    /// Serialize state to bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, StateError> {
-        rkyv::to_bytes::<_, 1024>(self)
-            .map_err(|e| StateError::SerializationError(e.to_string()))
-            .map(|b| b.to_vec())
-    }
-    
-    /// Deserialize state from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, StateError> {
-        let archived = rkyv::check_archived_root::<Self>(bytes)
-            .map_err(|e| StateError::DeserializationError(e.to_string()))?;
-        
-        archived.deserialize(&mut rkyv::Infallible)
-            .map_err(|e| StateError::DeserializationError(e.to_string()))
-    }
-}
 
 /// Manages state synchronization
 pub struct StateSynchronizer {
@@ -124,7 +62,9 @@ impl StateSynchronizer {
         let diff = StateDiff::generate(&self.current_state, &new_state)?;
         
         // Compress diff
-        let compressed_diff = self.compressor.compress(&diff.to_bytes()?)?;
+        let diff_bytes = diff.to_bytes()
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
+        let compressed_diff = self.compressor.compress(&diff_bytes)?;
         
         // Update sequence number
         self.current_seq += 1;
@@ -184,7 +124,8 @@ impl StateSynchronizer {
         
         // Decompress diff
         let diff_bytes = self.compressor.decompress(&update.compressed_diff)?;
-        let diff = StateDiff::from_bytes(&diff_bytes)?;
+        let diff = StateDiff::from_bytes(&diff_bytes)
+            .map_err(|e| StateError::DeserializationError(e.to_string()))?;
         
         // Apply diff to current state
         let new_state = diff.apply(&self.current_state)?;
@@ -203,14 +144,16 @@ impl StateSynchronizer {
     
     /// Generate full state for sync
     pub fn generate_sync(&self) -> Result<Vec<u8>, StateError> {
-        let state_bytes = self.current_state.to_bytes()?;
+        let state_bytes = self.current_state.to_bytes()
+            .map_err(|e| StateError::SerializationError(e.to_string()))?;
         self.compressor.compress(&state_bytes)
     }
     
     /// Apply full state sync
     pub fn apply_sync(&mut self, seq_num: u64, compressed_state: &[u8]) -> Result<(), StateError> {
         let state_bytes = self.compressor.decompress(compressed_state)?;
-        let new_state = TerminalState::from_bytes(&state_bytes)?;
+        let new_state = TerminalState::from_bytes(&state_bytes)
+            .map_err(|e| StateError::DeserializationError(e.to_string()))?;
         
         self.current_state = new_state;
         self.current_seq = seq_num;

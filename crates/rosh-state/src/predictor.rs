@@ -2,7 +2,7 @@
 //! 
 //! Predicts local terminal state changes before server confirmation
 
-use crate::sync::TerminalState;
+use rosh_terminal::TerminalState;
 use std::collections::VecDeque;
 
 /// Maximum number of predicted states to keep

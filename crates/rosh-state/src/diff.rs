@@ -2,7 +2,8 @@
 //! 
 //! Generates compact diffs between terminal states
 
-use crate::{StateError, sync::TerminalState};
+use crate::StateError;
+use rosh_terminal::TerminalState;
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// A diff between two terminal states
@@ -226,19 +227,19 @@ impl StateDiff {
     }
     
     /// Serialize diff to bytes
-    pub fn to_bytes(&self) -> Result<Vec<u8>, StateError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         rkyv::to_bytes::<_, 256>(self)
-            .map_err(|e| StateError::SerializationError(e.to_string()))
             .map(|b| b.to_vec())
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
     
     /// Deserialize diff from bytes
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, StateError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let archived = rkyv::check_archived_root::<Self>(bytes)
-            .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         
         archived.deserialize(&mut rkyv::Infallible)
-            .map_err(|e| StateError::DeserializationError(e.to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
 

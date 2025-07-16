@@ -7,6 +7,13 @@ pub mod emulator;
 pub mod parser;
 pub mod framebuffer;
 pub mod display;
+pub mod state;
+
+pub use emulator::{Terminal, TerminalSnapshot};
+pub use framebuffer::{FrameBuffer, Cell, Color, Attributes};
+pub use parser::Parser;
+pub use display::{framebuffer_to_state, state_to_cells, render_row_ansi};
+pub use state::TerminalState;
 
 use thiserror::Error;
 
