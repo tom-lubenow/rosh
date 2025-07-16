@@ -1,0 +1,286 @@
+//! State synchronization protocol implementation
+//! 
+//! Manages sequence numbers, acknowledgments, and state updates between client and server
+
+use crate::{StateError, diff::StateDiff, compress::{Compressor, CompressionAlgorithm}};
+use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+use tracing::debug;
+
+/// Maximum number of unacknowledged states to keep
+const MAX_PENDING_STATES: usize = 100;
+
+/// Terminal state that can be synchronized
+#[derive(Archive, Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[archive(check_bytes)]
+pub struct TerminalState {
+    /// Terminal dimensions
+    pub width: u16,
+    pub height: u16,
+    
+    /// Screen content (flattened 2D array)
+    pub screen: Vec<u8>,
+    
+    /// Cursor position
+    pub cursor_x: u16,
+    pub cursor_y: u16,
+    
+    /// Cursor visibility
+    pub cursor_visible: bool,
+    
+    /// Terminal title
+    pub title: String,
+    
+    /// Scrollback buffer
+    pub scrollback: Vec<Vec<u8>>,
+    
+    /// Terminal attributes (colors, styles, etc.)
+    pub attributes: Vec<u8>,
+}
+
+impl TerminalState {
+    /// Create a new terminal state
+    pub fn new(width: u16, height: u16) -> Self {
+        let screen_size = (width as usize) * (height as usize);
+        Self {
+            width,
+            height,
+            screen: vec![b' '; screen_size],
+            cursor_x: 0,
+            cursor_y: 0,
+            cursor_visible: true,
+            title: String::new(),
+            scrollback: Vec::new(),
+            attributes: vec![0; screen_size],
+        }
+    }
+    
+    /// Serialize state to bytes
+    pub fn to_bytes(&self) -> Result<Vec<u8>, StateError> {
+        rkyv::to_bytes::<_, 1024>(self)
+            .map_err(|e| StateError::SerializationError(e.to_string()))
+            .map(|b| b.to_vec())
+    }
+    
+    /// Deserialize state from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, StateError> {
+        let archived = rkyv::check_archived_root::<Self>(bytes)
+            .map_err(|e| StateError::DeserializationError(e.to_string()))?;
+        
+        archived.deserialize(&mut rkyv::Infallible)
+            .map_err(|e| StateError::DeserializationError(e.to_string()))
+    }
+}
+
+/// Manages state synchronization
+pub struct StateSynchronizer {
+    /// Current state sequence number
+    current_seq: u64,
+    
+    /// Last acknowledged sequence number from peer
+    last_ack: u64,
+    
+    /// Current terminal state
+    current_state: TerminalState,
+    
+    /// Pending states waiting for acknowledgment
+    pending_states: VecDeque<PendingState>,
+    
+    /// Compressor for state diffs
+    compressor: Compressor,
+    
+    /// Whether this is the server side
+    _is_server: bool,
+}
+
+#[derive(Debug)]
+struct PendingState {
+    seq_num: u64,
+    _state: TerminalState,
+    sent_at: Instant,
+}
+
+impl StateSynchronizer {
+    /// Create a new state synchronizer
+    pub fn new(initial_state: TerminalState, is_server: bool) -> Self {
+        Self {
+            current_seq: 0,
+            last_ack: 0,
+            current_state: initial_state,
+            pending_states: VecDeque::new(),
+            compressor: Compressor::new(CompressionAlgorithm::Zstd),
+            _is_server: is_server,
+        }
+    }
+    
+    /// Update local state and generate diff
+    pub fn update_state(&mut self, new_state: TerminalState) -> Result<Option<StateUpdate>, StateError> {
+        if new_state == self.current_state {
+            return Ok(None);
+        }
+        
+        // Generate diff
+        let diff = StateDiff::generate(&self.current_state, &new_state)?;
+        
+        // Compress diff
+        let compressed_diff = self.compressor.compress(&diff.to_bytes()?)?;
+        
+        // Update sequence number
+        self.current_seq += 1;
+        
+        // Store pending state
+        self.pending_states.push_back(PendingState {
+            seq_num: self.current_seq,
+            _state: new_state.clone(),
+            sent_at: Instant::now(),
+        });
+        
+        // Clean up old pending states
+        while self.pending_states.len() > MAX_PENDING_STATES {
+            self.pending_states.pop_front();
+        }
+        
+        // Update current state
+        self.current_state = new_state;
+        
+        Ok(Some(StateUpdate {
+            seq_num: self.current_seq,
+            ack_num: self.last_ack,
+            compressed_diff,
+        }))
+    }
+    
+    /// Process acknowledgment from peer
+    pub fn process_ack(&mut self, ack_num: u64) -> Duration {
+        if ack_num > self.last_ack {
+            self.last_ack = ack_num;
+            
+            // Remove acknowledged states and calculate RTT
+            let mut rtt = Duration::from_millis(0);
+            while let Some(pending) = self.pending_states.front() {
+                if pending.seq_num <= ack_num {
+                    let state = self.pending_states.pop_front().unwrap();
+                    rtt = state.sent_at.elapsed();
+                } else {
+                    break;
+                }
+            }
+            
+            debug!("Processed ACK {}, RTT: {:?}", ack_num, rtt);
+            rtt
+        } else {
+            Duration::from_millis(0)
+        }
+    }
+    
+    /// Apply state update from peer
+    pub fn apply_update(&mut self, update: StateUpdate) -> Result<u64, StateError> {
+        // Check if we've already processed this update
+        if update.seq_num <= self.last_ack {
+            debug!("Ignoring duplicate update {}", update.seq_num);
+            return Ok(self.last_ack);
+        }
+        
+        // Decompress diff
+        let diff_bytes = self.compressor.decompress(&update.compressed_diff)?;
+        let diff = StateDiff::from_bytes(&diff_bytes)?;
+        
+        // Apply diff to current state
+        let new_state = diff.apply(&self.current_state)?;
+        
+        // Update state
+        self.current_state = new_state;
+        self.last_ack = update.seq_num;
+        
+        Ok(self.last_ack)
+    }
+    
+    /// Request full state sync
+    pub fn request_sync(&self) -> u64 {
+        self.last_ack
+    }
+    
+    /// Generate full state for sync
+    pub fn generate_sync(&self) -> Result<Vec<u8>, StateError> {
+        let state_bytes = self.current_state.to_bytes()?;
+        self.compressor.compress(&state_bytes)
+    }
+    
+    /// Apply full state sync
+    pub fn apply_sync(&mut self, seq_num: u64, compressed_state: &[u8]) -> Result<(), StateError> {
+        let state_bytes = self.compressor.decompress(compressed_state)?;
+        let new_state = TerminalState::from_bytes(&state_bytes)?;
+        
+        self.current_state = new_state;
+        self.current_seq = seq_num;
+        self.last_ack = seq_num;
+        
+        // Clear pending states as we're now synced
+        self.pending_states.clear();
+        
+        Ok(())
+    }
+    
+    /// Get current state
+    pub fn current_state(&self) -> &TerminalState {
+        &self.current_state
+    }
+    
+    /// Get current sequence number
+    pub fn current_seq(&self) -> u64 {
+        self.current_seq
+    }
+    
+    /// Check if we need to resync (too many pending states)
+    pub fn needs_resync(&self) -> bool {
+        self.pending_states.len() >= MAX_PENDING_STATES / 2
+    }
+}
+
+/// State update message
+#[derive(Debug, Clone)]
+pub struct StateUpdate {
+    pub seq_num: u64,
+    pub ack_num: u64,
+    pub compressed_diff: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_terminal_state_serialization() {
+        let state = TerminalState::new(80, 24);
+        let bytes = state.to_bytes().unwrap();
+        let deserialized = TerminalState::from_bytes(&bytes).unwrap();
+        assert_eq!(state, deserialized);
+    }
+    
+    #[test]
+    fn test_state_synchronizer() {
+        let initial_state = TerminalState::new(80, 24);
+        let mut sync = StateSynchronizer::new(initial_state.clone(), true);
+        
+        // Update state
+        let mut new_state = initial_state.clone();
+        new_state.cursor_x = 5;
+        new_state.cursor_y = 10;
+        
+        let update = sync.update_state(new_state.clone()).unwrap();
+        assert!(update.is_some());
+        
+        let update = update.unwrap();
+        assert_eq!(update.seq_num, 1);
+        assert_eq!(update.ack_num, 0);
+        
+        // Process acknowledgment
+        let rtt = sync.process_ack(1);
+        assert!(rtt.as_millis() < 100); // Should be fast in tests
+        
+        // No update for same state
+        let update = sync.update_state(new_state).unwrap();
+        assert!(update.is_none());
+    }
+}
