@@ -21,12 +21,16 @@ pub const CHACHA_NONCE_SIZE: usize = 12;
 
 /// Supported cipher algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum CipherAlgorithm {
     /// AES-128-GCM
+    #[cfg_attr(feature = "clap", value(name = "aes-gcm"))]
     Aes128Gcm,
     /// AES-256-GCM
+    #[cfg_attr(feature = "clap", value(name = "aes-256-gcm"))]
     Aes256Gcm,
     /// ChaCha20-Poly1305
+    #[cfg_attr(feature = "clap", value(name = "chacha20-poly1305"))]
     ChaCha20Poly1305,
 }
 

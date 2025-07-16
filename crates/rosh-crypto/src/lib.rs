@@ -13,6 +13,7 @@ pub use cipher::{
 pub use key_exchange::{
     generate_key, encode_key, decode_key, 
     SessionInfo, KEY_ENV_VAR, get_key_from_env,
+    SessionKeys, KeyDerivation,
 };
 
 use thiserror::Error;

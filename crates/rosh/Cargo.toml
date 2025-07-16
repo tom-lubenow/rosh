@@ -14,13 +14,17 @@ name = "rosh-server"
 path = "src/bin/rosh-server.rs"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-rosh-crypto = { path = "../rosh-crypto" }
+rosh-crypto = { path = "../rosh-crypto", features = ["clap", "rkyv"] }
 rosh-network = { path = "../rosh-network" }
 rosh-terminal = { path = "../rosh-terminal" }
-rosh-state = { path = "../rosh-state" }
+rosh-state = { path = "../rosh-state", features = ["clap"] }
 rosh-pty = { path = "../rosh-pty" }
+uuid = { version = "1.8", features = ["v4"] }
+crossterm = "0.27"
+base64 = { workspace = true }
+rkyv = { workspace = true }

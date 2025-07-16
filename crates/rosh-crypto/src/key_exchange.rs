@@ -112,6 +112,46 @@ pub fn get_key_from_env() -> Option<String> {
     }
 }
 
+/// Session keys for bidirectional communication
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "rkyv", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[cfg_attr(feature = "rkyv", archive(check_bytes))]
+pub struct SessionKeys {
+    /// Key used by client for encryption (server uses for decryption)
+    pub client_write_key: Vec<u8>,
+    /// Key used by server for encryption (client uses for decryption)
+    pub server_write_key: Vec<u8>,
+}
+
+/// Key derivation using HKDF for generating session keys
+pub struct KeyDerivation {
+    master_key: Vec<u8>,
+}
+
+impl KeyDerivation {
+    /// Create a new key derivation context
+    pub fn new(master_key: &[u8]) -> Self {
+        Self {
+            master_key: master_key.to_vec(),
+        }
+    }
+    
+    /// Derive a key for a specific purpose
+    pub fn derive_key(&mut self, info: &[u8]) -> Vec<u8> {
+        use ring::hkdf;
+        
+        let salt = ring::hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
+        let prk = salt.extract(&self.master_key);
+        
+        let mut output = vec![0u8; 32]; // Always derive 32 bytes
+        let info_slice = [info];
+        let okm = prk.expand(&info_slice, ring::hkdf::HKDF_SHA256).unwrap();
+        okm.fill(&mut output).unwrap();
+        
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

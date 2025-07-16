@@ -15,18 +15,48 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[archive(check_bytes)]
 pub enum Message {
     /// Initial handshake from client
+    Handshake {
+        /// Serialized session keys
+        session_keys_bytes: Vec<u8>,
+        terminal_width: u16,
+        terminal_height: u16,
+    },
+    
+    /// Server response to handshake
+    HandshakeAck {
+        session_id: u64,
+        /// Cipher algorithm as u8 (0=AES128GCM, 1=AES256GCM, 2=ChaCha20Poly1305)
+        cipher_algorithm: u8,
+    },
+    
+    /// Initial handshake from client (legacy)
     ClientHello {
         version: u32,
         session_id: Option<u64>, // For resumption
     },
     
-    /// Server response to handshake
+    /// Server response to handshake (legacy)
     ServerHello {
         version: u32,
         session_id: u64,
     },
     
-    /// Terminal state update
+    /// User input from client
+    Input(Vec<u8>),
+    
+    /// Terminal resize notification
+    Resize(u16, u16),
+    
+    /// State message wrapper (serialized)
+    State(Vec<u8>),
+    
+    /// State acknowledgment
+    StateAck(u64),
+    
+    /// Request full state
+    StateRequest,
+    
+    /// Terminal state update (legacy)
     StateUpdate {
         /// Sequence number of this state
         seq_num: u64,
@@ -38,13 +68,13 @@ pub enum Message {
         timestamp: u64,
     },
     
-    /// Acknowledgment without state update
+    /// Acknowledgment without state update (legacy)
     Ack {
         ack_num: u64,
         timestamp: u64,
     },
     
-    /// User input from client
+    /// User input from client (legacy)
     UserInput {
         seq_num: u64,
         ack_num: u64,
@@ -54,21 +84,17 @@ pub enum Message {
     },
     
     /// Heartbeat/keepalive
-    Ping {
-        timestamp: u64,
-    },
+    Ping,
     
     /// Response to ping
-    Pong {
-        timestamp: u64,
-    },
+    Pong,
     
-    /// Request full state sync
+    /// Request full state sync (legacy)
     SyncRequest {
         last_known_seq: u64,
     },
     
-    /// Full state for sync
+    /// Full state for sync (legacy)
     SyncResponse {
         seq_num: u64,
         /// Compressed full state

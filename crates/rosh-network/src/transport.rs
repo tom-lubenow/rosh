@@ -6,7 +6,7 @@
 //! - Stream multiplexing
 //! - 0-RTT resumption
 
-use crate::NetworkError;
+use crate::{NetworkError, connection::{Connection as ConnectionTrait, QuicConnection}};
 use quinn::{
     ClientConfig, Endpoint, ServerConfig,
     Connection, RecvStream, SendStream,
@@ -16,9 +16,32 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rosh_crypto::{CipherAlgorithm, create_cipher};
 
 /// ALPN protocol identifier for Rosh
 const ALPN_ROSH: &[u8] = b"rosh/1";
+
+/// High-level network transport abstraction
+pub struct NetworkTransport;
+
+impl NetworkTransport {
+    /// Create a new client transport
+    pub async fn new_client(config: RoshTransportConfig) -> Result<ClientTransportWrapper, NetworkError> {
+        let transport = ClientTransport::new(config).await?;
+        Ok(ClientTransportWrapper { transport, key: None, algorithm: None })
+    }
+    
+    /// Create a new server transport  
+    pub async fn new_server(
+        bind_addr: SocketAddr,
+        _cert_chain: Vec<u8>,  // Ignored, we use self-signed certs internally
+        _private_key: Vec<u8>, // Ignored, we use self-signed certs internally
+        config: RoshTransportConfig,
+    ) -> Result<ServerTransportWrapper, NetworkError> {
+        let transport = ServerTransport::new(bind_addr, config).await?;
+        Ok(ServerTransportWrapper { transport, key: None, algorithm: None })
+    }
+}
 
 /// Configuration for transport layer
 #[derive(Debug, Clone)]
@@ -116,8 +139,8 @@ impl ServerTransport {
         Ok(Self { endpoint })
     }
     
-    /// Accept incoming connections
-    pub async fn accept(&self) -> Result<IncomingConnection, NetworkError> {
+    /// Accept incoming connections (raw)
+    pub async fn accept_raw(&self) -> Result<IncomingConnection, NetworkError> {
         let connecting = self.endpoint
             .accept()
             .await
@@ -127,6 +150,27 @@ impl ServerTransport {
             .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to accept connection: {}", e)))?;
             
         Ok(IncomingConnection { connection })
+    }
+    
+    /// Accept incoming connection and return wrapped connection
+    pub async fn accept(
+        &self,
+        key: &[u8],
+        algorithm: CipherAlgorithm,
+    ) -> Result<(Box<dyn ConnectionTrait>, SocketAddr), NetworkError> {
+        let incoming = self.accept_raw().await?;
+        let remote_addr = incoming.remote_address();
+        
+        // Accept a stream from the client
+        let (send, recv) = incoming.accept_stream().await?;
+        
+        // Create cipher
+        let cipher = Arc::new(create_cipher(algorithm, key)?);
+        
+        // Create the connection wrapper
+        let connection = QuicConnection::new(send, recv, cipher, true);
+        
+        Ok((Box::new(connection), remote_addr))
     }
     
     /// Get the server's bound address
@@ -232,6 +276,67 @@ fn create_transport_config(config: RoshTransportConfig) -> quinn::TransportConfi
 /// TODO: Implement proper certificate validation for production
 #[derive(Debug)]
 struct SkipServerVerification;
+
+/// Wrapper for client transport that provides connection method
+pub struct ClientTransportWrapper {
+    transport: ClientTransport,
+    key: Option<Vec<u8>>,
+    algorithm: Option<CipherAlgorithm>,
+}
+
+impl ClientTransportWrapper {
+    /// Set encryption key and algorithm
+    pub fn with_encryption(mut self, key: Vec<u8>, algorithm: CipherAlgorithm) -> Self {
+        self.key = Some(key);
+        self.algorithm = Some(algorithm);
+        self
+    }
+    
+    /// Connect to server and return a connection
+    pub async fn connect(&mut self, server_addr: SocketAddr) -> Result<Box<dyn ConnectionTrait>, NetworkError> {
+        // Use default key and algorithm if not set
+        let key = self.key.as_deref().unwrap_or(&[0u8; 32]);
+        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes128Gcm);
+        
+        self.transport.connect(server_addr).await?;
+        
+        // Open a stream for the connection
+        let (send, recv) = self.transport.open_stream().await?;
+        
+        // Create cipher
+        let cipher = Arc::new(create_cipher(algorithm, key)?);
+        
+        // Create the connection wrapper
+        let connection = QuicConnection::new(send, recv, cipher, false);
+        
+        Ok(Box::new(connection))
+    }
+}
+
+/// Wrapper for server transport that provides accept method
+pub struct ServerTransportWrapper {
+    transport: ServerTransport,
+    key: Option<Vec<u8>>,
+    algorithm: Option<CipherAlgorithm>,
+}
+
+impl ServerTransportWrapper {
+    /// Set encryption key and algorithm  
+    pub fn with_encryption(mut self, key: Vec<u8>, algorithm: CipherAlgorithm) -> Self {
+        self.key = Some(key);
+        self.algorithm = Some(algorithm);
+        self
+    }
+    
+    /// Accept incoming connection and return wrapped connection
+    pub async fn accept(&self) -> Result<(Box<dyn ConnectionTrait>, SocketAddr), NetworkError> {
+        // Use default key and algorithm if not set
+        let key = self.key.as_deref().unwrap_or(&[0u8; 32]);
+        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes128Gcm);
+        
+        self.transport.accept(key, algorithm).await
+    }
+}
 
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(

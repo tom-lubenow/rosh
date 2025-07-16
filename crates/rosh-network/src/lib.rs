@@ -7,9 +7,10 @@ pub mod transport;
 pub mod protocol;
 pub mod connection;
 
-pub use transport::{RoshTransportConfig, ClientTransport, ServerTransport};
+pub use transport::{RoshTransportConfig, NetworkTransport, ClientTransportWrapper, ServerTransportWrapper};
+pub use quinn::VarInt;
 pub use protocol::{Message, FramedCodec, MessageStats, PROTOCOL_VERSION};
-pub use connection::{ClientConnection, ServerConnection};
+pub use connection::{Connection, ClientConnection, ServerConnection, QuicConnection};
 
 use thiserror::Error;
 

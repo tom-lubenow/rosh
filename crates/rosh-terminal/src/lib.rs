@@ -12,7 +12,7 @@ pub mod state;
 pub use emulator::{Terminal, TerminalSnapshot};
 pub use framebuffer::{FrameBuffer, Cell, Color, Attributes};
 pub use parser::Parser;
-pub use display::{framebuffer_to_state, state_to_cells, render_row_ansi};
+pub use display::{framebuffer_to_state, state_to_cells, render_row_ansi, state_to_framebuffer};
 pub use state::TerminalState;
 
 use thiserror::Error;

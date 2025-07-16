@@ -7,14 +7,18 @@ use std::io::{Read, Write};
 
 /// Compression algorithm selection
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
 pub enum CompressionAlgorithm {
     /// Zstandard compression (better ratio, slightly slower)
+    #[cfg_attr(feature = "clap", value(name = "zstd"))]
     Zstd,
     /// LZ4 compression (faster, lower ratio)
+    #[cfg_attr(feature = "clap", value(name = "lz4"))]
     Lz4,
 }
 
 /// Compressor wrapper supporting multiple algorithms
+#[derive(Debug)]
 pub struct Compressor {
     algorithm: CompressionAlgorithm,
     compression_level: i32,

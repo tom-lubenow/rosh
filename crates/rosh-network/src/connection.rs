@@ -2,7 +2,7 @@
 //! 
 //! Provides encrypted, reliable message exchange over QUIC
 
-use crate::{NetworkError, protocol::{Message, FramedCodec, MessageStats, PROTOCOL_VERSION}};
+use crate::{NetworkError, protocol::{Message, FramedCodec, MessageStats}};
 use crate::transport::{ClientTransport, ServerTransport, IncomingConnection, RoshTransportConfig};
 use rosh_crypto::{Cipher, CipherAlgorithm, NonceGenerator, create_cipher};
 use bytes::BytesMut;
@@ -10,6 +10,147 @@ use quinn::{RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use async_trait::async_trait;
+
+/// Trait for network connections
+#[async_trait]
+pub trait Connection: Send + Sync {
+    /// Send a message
+    async fn send(&mut self, msg: Message) -> Result<(), NetworkError>;
+    
+    /// Receive a message
+    async fn receive(&mut self) -> Result<Message, NetworkError>;
+    
+    /// Clone the connection
+    fn clone_box(&self) -> Box<dyn Connection>;
+}
+
+impl Clone for Box<dyn Connection> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+/// Simple connection wrapper that handles encryption/decryption internally
+#[derive(Clone)]
+pub struct QuicConnection {
+    send_stream: Arc<Mutex<SendStream>>,
+    recv_stream: Arc<Mutex<RecvStream>>,
+    cipher: Arc<Box<dyn Cipher>>,
+    nonce_gen: Arc<Mutex<NonceGenerator>>,
+    stats: Arc<Mutex<MessageStats>>,
+}
+
+impl QuicConnection {
+    /// Create a new QUIC connection wrapper
+    pub fn new(
+        send_stream: SendStream,
+        recv_stream: RecvStream,
+        cipher: Arc<Box<dyn Cipher>>,
+        is_server: bool,
+    ) -> Self {
+        Self {
+            send_stream: Arc::new(Mutex::new(send_stream)),
+            recv_stream: Arc::new(Mutex::new(recv_stream)),
+            cipher,
+            nonce_gen: Arc::new(Mutex::new(NonceGenerator::new(is_server))),
+            stats: Arc::new(Mutex::new(MessageStats::default())),
+        }
+    }
+    
+    /// Send a message on the stream
+    async fn send_message(&self, msg: &Message) -> Result<(), NetworkError> {
+        let mut buf = BytesMut::new();
+        FramedCodec::encode(msg, &mut buf)?;
+        
+        // Encrypt the message
+        let nonce = {
+            let mut gen = self.nonce_gen.lock().await;
+            gen.next_nonce()
+        };
+        
+        let ciphertext = self.cipher.encrypt(&nonce, &buf, &[])?;
+        
+        // Write nonce + length + ciphertext
+        let mut stream = self.send_stream.lock().await;
+        stream.write_all(&nonce).await
+            .map_err(|e| NetworkError::TransportError(format!("Write failed: {}", e)))?;
+        stream.write_all(&(ciphertext.len() as u32).to_be_bytes()).await
+            .map_err(|e| NetworkError::TransportError(format!("Write failed: {}", e)))?;
+        stream.write_all(&ciphertext).await
+            .map_err(|e| NetworkError::TransportError(format!("Write failed: {}", e)))?;
+            
+        // Update stats
+        {
+            let mut stats = self.stats.lock().await;
+            stats.messages_sent += 1;
+            stats.bytes_sent += (nonce.len() + ciphertext.len()) as u64;
+        }
+        
+        Ok(())
+    }
+    
+    /// Receive a message from the stream
+    async fn receive_message(&self) -> Result<Message, NetworkError> {
+        let mut stream = self.recv_stream.lock().await;
+        
+        // Read nonce
+        let mut nonce = [0u8; 12];
+        stream.read_exact(&mut nonce).await
+            .map_err(|e| NetworkError::TransportError(format!("Read failed: {}", e)))?;
+            
+        // Read length prefix for ciphertext
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await
+            .map_err(|e| NetworkError::TransportError(format!("Read failed: {}", e)))?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        
+        // Read ciphertext
+        let mut ciphertext = vec![0u8; len];
+        stream.read_exact(&mut ciphertext).await
+            .map_err(|e| NetworkError::TransportError(format!("Read failed: {}", e)))?;
+            
+        // Decrypt
+        let plaintext = self.cipher.decrypt(&nonce, &ciphertext, &[])?;
+        
+        // Decode message
+        let mut buf = BytesMut::from(&plaintext[..]);
+        let msg = FramedCodec::decode(&mut buf)?
+            .ok_or_else(|| NetworkError::ProtocolError("Incomplete message".to_string()))?;
+            
+        // Update stats
+        {
+            let mut stats = self.stats.lock().await;
+            stats.messages_received += 1;
+            stats.bytes_received += (nonce.len() + 4 + ciphertext.len()) as u64;
+            
+            // Update RTT if applicable
+            match &msg {
+                Message::Pong => stats.update_rtt(Message::timestamp_now()),
+                Message::Ack { timestamp, .. } => stats.update_rtt(*timestamp),
+                Message::StateUpdate { timestamp, .. } => stats.update_rtt(*timestamp),
+                _ => {}
+            }
+        }
+        
+        Ok(msg)
+    }
+}
+
+#[async_trait]
+impl Connection for QuicConnection {
+    async fn send(&mut self, msg: Message) -> Result<(), NetworkError> {
+        self.send_message(&msg).await
+    }
+    
+    async fn receive(&mut self) -> Result<Message, NetworkError> {
+        self.receive_message().await
+    }
+    
+    fn clone_box(&self) -> Box<dyn Connection> {
+        Box::new(self.clone())
+    }
+}
 
 /// Client connection manager
 pub struct ClientConnection {
@@ -43,30 +184,11 @@ impl ClientConnection {
     pub async fn connect(&mut self, addr: SocketAddr) -> Result<u64, NetworkError> {
         self.transport.connect(addr).await?;
         
-        let (mut send, mut recv) = self.transport.open_stream().await?;
+        let (_send, _recv) = self.transport.open_stream().await?;
         
-        // Send client hello
-        let hello = Message::ClientHello {
-            version: PROTOCOL_VERSION,
-            session_id: None,
-        };
-        
-        self.send_message(&mut send, &hello).await?;
-        
-        // Receive server hello
-        let response = self.receive_message(&mut recv).await?;
-        
-        match response {
-            Message::ServerHello { version, session_id } => {
-                if version != PROTOCOL_VERSION {
-                    return Err(NetworkError::ProtocolError(
-                        format!("Protocol version mismatch: got {}, expected {}", version, PROTOCOL_VERSION)
-                    ));
-                }
-                Ok(session_id)
-            }
-            _ => Err(NetworkError::ProtocolError("Expected ServerHello".to_string())),
-        }
+        // For now, skip the handshake and return a dummy session ID
+        // The actual handshake will be done at a higher level
+        Ok(0)
     }
     
     /// Send a message on a stream
@@ -141,7 +263,7 @@ impl ClientConnection {
             
             // Update RTT if applicable
             match &msg {
-                Message::Pong { timestamp } => stats.update_rtt(*timestamp),
+                Message::Pong => stats.update_rtt(Message::timestamp_now()),
                 Message::Ack { timestamp, .. } => stats.update_rtt(*timestamp),
                 Message::StateUpdate { timestamp, .. } => stats.update_rtt(*timestamp),
                 _ => {}
@@ -178,7 +300,7 @@ impl ServerConnection {
         key: &[u8],
         algorithm: CipherAlgorithm,
     ) -> Result<Self, NetworkError> {
-        let incoming = transport.accept().await?;
+        let incoming = transport.accept_raw().await?;
         let cipher = Arc::new(create_cipher(algorithm, key)?);
         let nonce_gen = Arc::new(Mutex::new(NonceGenerator::new(true))); // true = server
         let stats = Arc::new(Mutex::new(MessageStats::default()));
@@ -200,30 +322,10 @@ impl ServerConnection {
     
     /// Perform server-side handshake
     async fn handshake(&mut self) -> Result<(), NetworkError> {
-        let (mut send, mut recv) = self.incoming.accept_stream().await?;
+        let (_send, _recv) = self.incoming.accept_stream().await?;
         
-        // Receive client hello
-        let hello = self.receive_message(&mut recv).await?;
-        
-        match hello {
-            Message::ClientHello { version, .. } => {
-                if version != PROTOCOL_VERSION {
-                    return Err(NetworkError::ProtocolError(
-                        format!("Protocol version mismatch: got {}, expected {}", version, PROTOCOL_VERSION)
-                    ));
-                }
-            }
-            _ => return Err(NetworkError::ProtocolError("Expected ClientHello".to_string())),
-        }
-        
-        // Send server hello
-        let response = Message::ServerHello {
-            version: PROTOCOL_VERSION,
-            session_id: self.session_id,
-        };
-        
-        self.send_message(&mut send, &response).await?;
-        
+        // For now, skip the handshake
+        // The actual handshake will be done at a higher level
         Ok(())
     }
     
@@ -289,7 +391,7 @@ impl ServerConnection {
             stats.bytes_received += (nonce.len() + 4 + ciphertext.len()) as u64;
             
             match &msg {
-                Message::Pong { timestamp } => stats.update_rtt(*timestamp),
+                Message::Pong => stats.update_rtt(Message::timestamp_now()),
                 Message::Ack { timestamp, .. } => stats.update_rtt(*timestamp),
                 Message::StateUpdate { timestamp, .. } => stats.update_rtt(*timestamp),
                 _ => {}

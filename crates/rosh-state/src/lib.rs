@@ -8,7 +8,7 @@ pub mod diff;
 pub mod compress;
 pub mod predictor;
 
-pub use sync::{StateSynchronizer, StateUpdate};
+pub use sync::{StateSynchronizer, StateUpdate, StateMessage};
 pub use diff::StateDiff;
 pub use compress::{Compressor, CompressionAlgorithm, AdaptiveCompressor};
 pub use predictor::{Predictor, UserInput, KeyCode};

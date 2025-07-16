@@ -13,6 +13,11 @@ lz4_flex = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 rosh-terminal = { path = "../rosh-terminal" }
+clap = { workspace = true, optional = true }
+
+[features]
+default = []
+clap = ["dep:clap"]
 
 [dev-dependencies]
 criterion = "0.5"

@@ -12,6 +12,13 @@ chacha20poly1305 = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
+clap = { workspace = true, optional = true }
+rkyv = { workspace = true, optional = true }
+
+[features]
+default = []
+clap = ["dep:clap"]
+rkyv = ["dep:rkyv"]
 
 [dev-dependencies]
 hex = "0.4"

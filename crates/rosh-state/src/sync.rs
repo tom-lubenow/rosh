@@ -7,6 +7,31 @@ use rosh_terminal::TerminalState;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tracing::debug;
+use rkyv::{Archive, Deserialize, Serialize};
+
+/// Messages for state synchronization
+#[derive(Debug, Clone, Archive, Deserialize, Serialize)]
+#[archive(check_bytes)]
+pub enum StateMessage {
+    /// Full state snapshot
+    FullState {
+        /// Sequence number
+        seq: u64,
+        /// Complete terminal state
+        state: TerminalState,
+    },
+    
+    /// Delta update from a previous state
+    Delta {
+        /// Sequence number
+        seq: u64,
+        /// State changes
+        delta: StateDiff,
+    },
+    
+    /// Acknowledgment of received state
+    Ack(u64),
+}
 
 /// Maximum number of unacknowledged states to keep
 const MAX_PENDING_STATES: usize = 100;

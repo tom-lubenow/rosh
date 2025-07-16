@@ -40,6 +40,37 @@ pub fn framebuffer_to_state(fb: &FrameBuffer, title: &str) -> TerminalState {
     }
 }
 
+/// Convert a TerminalState to a FrameBuffer
+pub fn state_to_framebuffer(state: &TerminalState, fb: &mut FrameBuffer) {
+    // Resize framebuffer if needed
+    if fb.width() != state.width || fb.height() != state.height {
+        fb.resize(state.width, state.height);
+    }
+    
+    // Update cells
+    for y in 0..state.height {
+        for x in 0..state.width {
+            let idx = (y * state.width + x) as usize;
+            if idx < state.screen.len() {
+                let c = state.screen[idx] as char;
+                let attr_byte = state.attributes.get(idx).copied().unwrap_or(0);
+                let (fg, bg, attrs) = attribute_to_cell_attrs(attr_byte);
+                
+                if let Some(cell) = fb.cell_at_mut(x, y) {
+                    cell.c = c;
+                    cell.fg = fg;
+                    cell.bg = bg;
+                    cell.attrs = attrs;
+                }
+            }
+        }
+    }
+    
+    // Update cursor
+    fb.set_cursor_position(state.cursor_x, state.cursor_y);
+    fb.set_cursor_visible(state.cursor_visible);
+}
+
 /// Convert a TerminalState back to cells for a FrameBuffer
 pub fn state_to_cells(state: &TerminalState) -> Vec<Cell> {
     let mut cells = Vec::with_capacity(state.screen.len());
