@@ -12,12 +12,15 @@ use crossterm::{
 use rkyv::Deserialize;
 use rosh_crypto::{CipherAlgorithm, KeyDerivation, SessionKeys};
 use rosh_network::{Message as NetworkMessage, NetworkTransport, RoshTransportConfig, VarInt};
-use rosh_state::{CompressionAlgorithm, StateMessage, StateSynchronizer, StateUpdate};
+use rosh_state::{CompressionAlgorithm, StateMessage, StateSynchronizer};
 use rosh_terminal::{state_to_framebuffer, Terminal, TerminalState};
 use std::io::{self, Write};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time;
 use tracing::{debug, info, warn};
@@ -34,12 +37,12 @@ enum LogLevel {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Rosh client - Modern mobile shell client")]
 struct Args {
-    /// Server address to connect to
-    server: SocketAddr,
+    /// Server address to connect to (host:port or user@host for SSH)
+    server: String,
 
-    /// Session key (base64 encoded)
+    /// Session key (base64 encoded) - for direct connection only
     #[arg(short, long)]
-    key: String,
+    key: Option<String>,
 
     /// Cipher algorithm to use
     #[arg(short = 'a', long, value_enum, default_value = "aes-gcm")]
@@ -60,6 +63,18 @@ struct Args {
     /// Enable predictive echo
     #[arg(long)]
     predict: bool,
+
+    /// SSH port (for SSH connections)
+    #[arg(long, default_value = "22")]
+    ssh_port: u16,
+
+    /// Remote command to start server (for SSH connections)
+    #[arg(long, default_value = "rosh-server")]
+    remote_command: String,
+
+    /// Additional SSH options
+    #[arg(long)]
+    ssh_options: Vec<String>,
 }
 
 /// Terminal UI state
@@ -220,6 +235,184 @@ impl TerminalUI {
     }
 }
 
+/// Connection info returned from SSH
+#[derive(Debug)]
+struct ConnectionInfo {
+    host: String,
+    port: u16,
+    session_key: String,
+}
+
+/// Parse server argument to determine connection type
+fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
+    if server.contains('@') {
+        // SSH format: user@host
+        let parts: Vec<&str> = server.split('@').collect();
+        if parts.len() == 2 {
+            return (true, Some(parts[0].to_string()), parts[1].to_string());
+        }
+    } else if !server.contains(':') {
+        // Just hostname, assume SSH
+        return (true, None, server.to_string());
+    }
+
+    // Direct connection format: host:port
+    (false, None, server.to_string())
+}
+
+/// Start server via SSH and get connection info
+async fn start_server_via_ssh(
+    user: Option<&str>,
+    host: &str,
+    ssh_port: u16,
+    remote_command: &str,
+    ssh_options: &[String],
+    cipher: CipherAlgorithm,
+    compression: Option<CompressionAlgorithm>,
+) -> Result<ConnectionInfo> {
+    info!("Starting server on {} via SSH", host);
+
+    // Build SSH command
+    let mut ssh_cmd = Command::new("ssh");
+
+    // Add SSH options
+    ssh_cmd.arg("-p").arg(ssh_port.to_string());
+    ssh_cmd.arg("-o").arg("ControlMaster=no");
+    ssh_cmd.arg("-o").arg("ControlPath=none");
+
+    for opt in ssh_options {
+        ssh_cmd.arg("-o").arg(opt);
+    }
+
+    // Add user@host or just host
+    if let Some(user) = user {
+        ssh_cmd.arg(format!("{user}@{host}"));
+    } else {
+        ssh_cmd.arg(host);
+    }
+
+    // Build remote command
+    let mut remote_args = vec![
+        remote_command.to_string(),
+        "--bind".to_string(),
+        "127.0.0.1:0".to_string(), // Bind to random port
+        "--one-shot".to_string(),  // Exit after one connection
+    ];
+
+    // Add cipher and compression options
+    match cipher {
+        CipherAlgorithm::Aes128Gcm => {
+            remote_args.extend(["--cipher".to_string(), "aes128-gcm".to_string()])
+        }
+        CipherAlgorithm::Aes256Gcm => {
+            remote_args.extend(["--cipher".to_string(), "aes256-gcm".to_string()])
+        }
+        CipherAlgorithm::ChaCha20Poly1305 => {
+            remote_args.extend(["--cipher".to_string(), "chacha20-poly1305".to_string()])
+        }
+    }
+
+    if let Some(comp) = compression {
+        match comp {
+            CompressionAlgorithm::Zstd => {
+                remote_args.extend(["--compression".to_string(), "zstd".to_string()])
+            }
+            CompressionAlgorithm::Lz4 => {
+                remote_args.extend(["--compression".to_string(), "lz4".to_string()])
+            }
+        }
+    }
+
+    // Join args with proper escaping
+    let remote_cmd_str = remote_args.join(" ");
+    ssh_cmd.arg(remote_cmd_str);
+
+    // Set up process
+    ssh_cmd.stdout(Stdio::piped());
+    ssh_cmd.stderr(Stdio::piped());
+
+    let mut child = ssh_cmd.spawn().context("Failed to spawn SSH process")?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get stdout from SSH"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get stderr from SSH"))?;
+
+    let mut stdout_reader = BufReader::new(stdout);
+    let mut stderr_reader = BufReader::new(stderr);
+
+    // Read output looking for connection info
+    let mut session_key = None;
+    let mut port = None;
+
+    // We expect output like:
+    // ROSH_PORT=12345
+    // ROSH_KEY=base64encodedkey
+
+    let timeout = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            anyhow::bail!("Timeout waiting for server to start");
+        }
+
+        // Try to read from stdout and stderr
+        let mut stdout_line = String::new();
+        let mut stderr_line = String::new();
+
+        tokio::select! {
+            result = stdout_reader.read_line(&mut stdout_line) => {
+                if result? == 0 {
+                    break; // EOF
+                }
+
+                let line = stdout_line.trim();
+                if line.starts_with("ROSH_PORT=") {
+                    port = Some(line.strip_prefix("ROSH_PORT=").unwrap().parse::<u16>()
+                        .context("Failed to parse port")?);
+                } else if line.starts_with("ROSH_KEY=") {
+                    session_key = Some(line.strip_prefix("ROSH_KEY=").unwrap().to_string());
+                }
+            }
+
+            result = stderr_reader.read_line(&mut stderr_line) => {
+                if result? > 0 {
+                    debug!("SSH stderr: {}", stderr_line.trim());
+                }
+            }
+
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // Check if we have all info
+                if session_key.is_some() && port.is_some() {
+                    break;
+                }
+            }
+        }
+
+        if session_key.is_some() && port.is_some() {
+            break;
+        }
+    }
+
+    // Kill SSH process once we have the info
+    let _ = child.kill().await;
+
+    let session_key =
+        session_key.ok_or_else(|| anyhow::anyhow!("Server did not provide session key"))?;
+    let port = port.ok_or_else(|| anyhow::anyhow!("Server did not provide port"))?;
+
+    Ok(ConnectionInfo {
+        host: host.to_string(),
+        port,
+        session_key,
+    })
+}
+
 pub async fn run() -> Result<()> {
     let args = Args::parse();
 
@@ -237,12 +430,57 @@ pub async fn run() -> Result<()> {
         .with_writer(io::stderr)
         .init();
 
-    info!("Connecting to Rosh server at {}", args.server);
+    // Parse server argument
+    let (is_ssh, user, host) = parse_server_arg(&args.server);
+
+    // Get connection info
+    let (server_addr, session_key_str) = if is_ssh {
+        // SSH connection
+        if args.key.is_some() {
+            anyhow::bail!("Cannot specify --key with SSH connection");
+        }
+
+        let conn_info = start_server_via_ssh(
+            user.as_deref(),
+            &host,
+            args.ssh_port,
+            &args.remote_command,
+            &args.ssh_options,
+            args.cipher,
+            args.compression,
+        )
+        .await?;
+
+        // Resolve hostname to IP
+        let addr_str = format!("{}:{}", conn_info.host, conn_info.port);
+        let mut addrs = addr_str
+            .to_socket_addrs()
+            .with_context(|| format!("Failed to resolve {addr_str}"))?;
+        let server_addr = addrs
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("No addresses found for {}", addr_str))?;
+
+        (server_addr, conn_info.session_key)
+    } else {
+        // Direct connection
+        let session_key = args
+            .key
+            .ok_or_else(|| anyhow::anyhow!("--key required for direct connection"))?;
+
+        let server_addr: SocketAddr = args
+            .server
+            .parse()
+            .with_context(|| format!("Failed to parse server address: {}", args.server))?;
+
+        (server_addr, session_key)
+    };
+
+    info!("Connecting to Rosh server at {}", server_addr);
 
     // Decode session key
     use base64::Engine;
     let key_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&args.key)
+        .decode(&session_key_str)
         .context("Failed to decode session key")?;
 
     // Derive session keys
@@ -265,7 +503,7 @@ pub async fn run() -> Result<()> {
 
     // Connect to server
     let mut transport = NetworkTransport::new_client(transport_config).await?;
-    let mut connection = transport.connect(args.server).await?;
+    let mut connection = transport.connect(server_addr).await?;
 
     // Send handshake
     let session_keys_bytes = rkyv::to_bytes::<_, 256>(&session_keys)
@@ -315,7 +553,7 @@ pub async fn run() -> Result<()> {
 
     // Create channels
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
     // Spawn input handler
     let input_handle = tokio::task::spawn_blocking({
@@ -371,7 +609,7 @@ async fn run_client_loop(
     ui: &mut TerminalUI,
     state_sync: Arc<RwLock<StateSynchronizer>>,
     input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    _shutdown_tx: tokio::sync::broadcast::Sender<()>,
 ) -> Result<()> {
     let mut ping_interval = time::interval(Duration::from_secs(30));
     let mut last_render = time::Instant::now();
@@ -418,7 +656,7 @@ async fn run_client_loop(
                                 // Send acknowledgment
                                 connection.send(NetworkMessage::StateAck(seq)).await?;
                             }
-                            StateMessage::Delta { seq, delta } => {
+                            StateMessage::Delta { seq: _, delta: _ } => {
                                 // For now, just request full state on delta
                                 // TODO: Implement proper delta handling
                                 warn!("Delta updates not yet implemented, requesting full state");

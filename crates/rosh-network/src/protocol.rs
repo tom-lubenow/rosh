@@ -195,13 +195,13 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
-        let msg = Message::Ping { timestamp: 12345 };
+        let msg = Message::Ping;
 
         let bytes = msg.to_bytes().unwrap();
         let decoded = Message::from_bytes(&bytes).unwrap();
 
         match decoded {
-            Message::Ping { timestamp } => assert_eq!(timestamp, 12345),
+            Message::Ping => {},
             _ => panic!("Wrong message type"),
         }
     }
@@ -213,7 +213,7 @@ mod tests {
             timestamp: 1000,
         };
 
-        let msg2 = Message::Ping { timestamp: 2000 };
+        let msg2 = Message::Ping;
 
         let mut buf = BytesMut::new();
 
@@ -234,7 +234,7 @@ mod tests {
         // Decode second message
         let decoded2 = FramedCodec::decode(&mut buf).unwrap().unwrap();
         match decoded2 {
-            Message::Ping { timestamp } => assert_eq!(timestamp, 2000),
+            Message::Ping => {},
             _ => panic!("Wrong message type"),
         }
 

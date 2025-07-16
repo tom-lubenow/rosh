@@ -61,7 +61,6 @@ pub struct Attributes {
     pub blink: bool,
 }
 
-
 /// Frame buffer containing terminal content
 #[derive(Debug, Clone)]
 pub struct FrameBuffer {

@@ -43,9 +43,8 @@ impl Pty {
         let slave_fd = slave.into_raw_fd();
 
         // Set non-blocking mode on master
-        fcntl(master_fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).map_err(|e| {
-            PtyError::AllocationFailed(format!("Failed to set non-blocking: {e}"))
-        })?;
+        fcntl(master_fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+            .map_err(|e| PtyError::AllocationFailed(format!("Failed to set non-blocking: {e}")))?;
 
         Ok(Self {
             master: PtyMaster { fd: master_fd },

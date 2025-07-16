@@ -314,7 +314,7 @@ pub struct ServerConnection {
     cipher: Arc<Box<dyn Cipher>>,
     nonce_gen: Arc<Mutex<NonceGenerator>>,
     stats: Arc<Mutex<MessageStats>>,
-    session_id: u64,
+    _session_id: u64,
 }
 
 impl ServerConnection {
@@ -335,7 +335,7 @@ impl ServerConnection {
             cipher,
             nonce_gen,
             stats,
-            session_id,
+            _session_id: session_id,
         };
 
         // Perform handshake

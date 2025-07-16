@@ -295,9 +295,11 @@ mod tests {
 
     #[test]
     fn test_attribute_encoding() {
-        let mut attrs = Attributes::default();
-        attrs.bold = true;
-        attrs.underline = true;
+        let attrs = Attributes {
+            bold: true,
+            underline: true,
+            ..Default::default()
+        };
 
         let cell = Cell {
             c: 'A',

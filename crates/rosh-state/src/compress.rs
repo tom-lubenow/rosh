@@ -89,9 +89,7 @@ impl Compressor {
 
     /// Compress using LZ4
     fn compress_lz4(&self, data: &[u8]) -> Result<Vec<u8>, StateError> {
-        lz4_flex::compress_prepend_size(data)
-            .try_into()
-            .map_err(|_| StateError::CompressionError("LZ4 compression failed".to_string()))
+        Ok(lz4_flex::compress_prepend_size(data))
     }
 
     /// Decompress using LZ4

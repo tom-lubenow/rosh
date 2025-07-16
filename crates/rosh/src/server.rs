@@ -8,6 +8,7 @@ use rosh_network::{Message as NetworkMessage, NetworkTransport, RoshTransportCon
 use rosh_pty::{PtySession, SessionBuilder, SessionEvent};
 use rosh_state::{CompressionAlgorithm, StateMessage, StateSynchronizer};
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,13 +34,13 @@ struct Args {
     #[arg(short, long, default_value = "0.0.0.0:2022")]
     bind: SocketAddr,
 
-    /// Path to server certificate
-    #[arg(short, long)]
-    cert: PathBuf,
+    /// Path to server certificate (required unless --one-shot)
+    #[arg(short, long, required_unless_present = "one_shot")]
+    cert: Option<PathBuf>,
 
-    /// Path to server private key
-    #[arg(short, long)]
-    key: PathBuf,
+    /// Path to server private key (required unless --one-shot)
+    #[arg(short, long, required_unless_present = "one_shot")]
+    key: Option<PathBuf>,
 
     /// Cipher algorithm to use
     #[arg(short = 'a', long, value_enum, default_value = "aes-gcm")]
@@ -60,14 +61,18 @@ struct Args {
     /// Maximum number of concurrent sessions
     #[arg(long, default_value = "100")]
     max_sessions: usize,
+
+    /// One-shot mode: generate key, serve one connection, then exit
+    #[arg(long)]
+    one_shot: bool,
 }
 
 /// Active session state
 struct Session {
     id: Uuid,
     pty_session: PtySession,
-    state_sync: Arc<RwLock<StateSynchronizer>>,
-    client_addr: SocketAddr,
+    _state_sync: Arc<RwLock<StateSynchronizer>>,
+    _client_addr: SocketAddr,
     last_activity: Arc<RwLock<time::Instant>>,
 }
 
@@ -105,6 +110,32 @@ impl ServerState {
     }
 }
 
+/// Generate a self-signed certificate for one-shot mode
+fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
+    use rcgen::{Certificate, CertificateParams, DistinguishedName};
+
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    params.subject_alt_names = vec![
+        rcgen::SanType::DnsName("localhost".to_string()),
+        rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+        rcgen::SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+    ];
+
+    let cert = Certificate::from_params(params)
+        .map_err(|e| anyhow::anyhow!("Failed to generate certificate: {}", e))?;
+
+    let cert_pem = cert
+        .serialize_pem()
+        .map_err(|e| anyhow::anyhow!("Failed to serialize certificate: {}", e))?;
+    let key_pem = cert.serialize_private_key_pem();
+
+    Ok((cert_pem.into_bytes(), key_pem.into_bytes()))
+}
+
 pub async fn run() -> Result<()> {
     let args = Args::parse();
 
@@ -117,15 +148,48 @@ pub async fn run() -> Result<()> {
         LogLevel::Error => tracing::Level::ERROR,
     };
 
-    tracing_subscriber::fmt().with_max_level(log_level).init();
+    // In one-shot mode, only output to stderr
+    if args.one_shot {
+        tracing_subscriber::fmt()
+            .with_max_level(log_level)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_max_level(log_level).init();
+    }
+
+    // Generate session key for one-shot mode
+    let session_key = if args.one_shot {
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Some(key)
+    } else {
+        None
+    };
 
     info!("Starting Rosh server on {}", args.bind);
 
     // Load certificates
-    let cert_chain = std::fs::read(&args.cert)
-        .with_context(|| format!("Failed to read certificate from {:?}", args.cert))?;
-    let private_key = std::fs::read(&args.key)
-        .with_context(|| format!("Failed to read private key from {:?}", args.key))?;
+    let (cert_chain, private_key) = if args.one_shot {
+        // Generate self-signed certificate for one-shot mode
+        generate_self_signed_cert()?
+    } else {
+        // Load from files
+        let cert_path = args.cert.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Certificate path required when not in one-shot mode")
+        })?;
+        let key_path = args
+            .key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Key path required when not in one-shot mode"))?;
+
+        let cert = std::fs::read(cert_path)
+            .with_context(|| format!("Failed to read certificate from {cert_path:?}"))?;
+        let key = std::fs::read(key_path)
+            .with_context(|| format!("Failed to read private key from {key_path:?}"))?;
+        (cert, key)
+    };
 
     // Create transport config
     let transport_config = RoshTransportConfig {
@@ -136,14 +200,28 @@ pub async fn run() -> Result<()> {
     };
 
     // Create network transport
-    let mut transport =
+    let transport =
         NetworkTransport::new_server(args.bind, cert_chain, private_key, transport_config).await?;
+
+    // Get actual bound address (in case port was 0)
+    let bound_addr = transport.local_addr()?;
+
+    // Output connection info for one-shot mode
+    if args.one_shot {
+        use base64::Engine;
+        let encoded_key =
+            base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
+        println!("ROSH_PORT={}", bound_addr.port());
+        println!("ROSH_KEY={encoded_key}");
+        std::io::stdout().flush()?;
+    }
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
 
-    info!("Server listening on {}", args.bind);
+    info!("Server listening on {}", bound_addr);
 
     // Accept connections
+    let mut _connection_count = 0;
     loop {
         match transport.accept().await {
             Ok((connection, client_addr)) => {
@@ -152,20 +230,44 @@ pub async fn run() -> Result<()> {
                 let server_state = server_state.clone();
                 let cipher_algo = args.cipher;
                 let compression = args.compression;
+                let one_shot = args.one_shot;
+                let session_key_clone = session_key.clone();
 
-                tokio::spawn(async move {
+                if one_shot {
+                    // In one-shot mode, handle synchronously and exit
                     if let Err(e) = handle_connection(
                         connection,
                         client_addr,
                         server_state,
                         cipher_algo,
                         compression,
+                        session_key_clone,
                     )
                     .await
                     {
                         error!("Connection error from {}: {}", client_addr, e);
                     }
-                });
+                    info!("One-shot connection completed, exiting");
+                    return Ok(());
+                } else {
+                    // Normal mode, spawn task
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_connection(
+                            connection,
+                            client_addr,
+                            server_state,
+                            cipher_algo,
+                            compression,
+                            session_key_clone,
+                        )
+                        .await
+                        {
+                            error!("Connection error from {}: {}", client_addr, e);
+                        }
+                    });
+                }
+
+                _connection_count += 1;
             }
             Err(e) => {
                 error!("Failed to accept connection: {}", e);
@@ -179,7 +281,8 @@ async fn handle_connection(
     client_addr: SocketAddr,
     server_state: Arc<ServerState>,
     cipher_algo: CipherAlgorithm,
-    compression: Option<CompressionAlgorithm>,
+    _compression: Option<CompressionAlgorithm>,
+    _one_shot_key: Option<Vec<u8>>,
 ) -> Result<()> {
     // Receive initial handshake message
     let msg = time::timeout(Duration::from_secs(10), connection.receive())
@@ -224,8 +327,8 @@ async fn handle_connection(
     let session = Session {
         id: session_id,
         pty_session,
-        state_sync: state_sync.clone(),
-        client_addr,
+        _state_sync: state_sync.clone(),
+        _client_addr: client_addr,
         last_activity: Arc::new(RwLock::new(time::Instant::now())),
     };
 

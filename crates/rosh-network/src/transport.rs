@@ -90,9 +90,8 @@ impl ClientTransport {
         let _client_config = create_client_config(config)?;
 
         // Bind to any available port
-        let endpoint = Endpoint::client("[::]:0".parse().unwrap()).map_err(|e| {
-            NetworkError::TransportError(format!("Failed to create endpoint: {e}"))
-        })?;
+        let endpoint = Endpoint::client("[::]:0".parse().unwrap())
+            .map_err(|e| NetworkError::TransportError(format!("Failed to create endpoint: {e}")))?;
 
         Ok(Self {
             endpoint,
@@ -201,9 +200,9 @@ impl ServerTransport {
 
     /// Get the server's bound address
     pub fn local_addr(&self) -> Result<SocketAddr, NetworkError> {
-        self.endpoint.local_addr().map_err(|e| {
-            NetworkError::TransportError(format!("Failed to get local address: {e}"))
-        })
+        self.endpoint
+            .local_addr()
+            .map_err(|e| NetworkError::TransportError(format!("Failed to get local address: {e}")))
     }
 }
 
@@ -374,6 +373,11 @@ impl ServerTransportWrapper {
         let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes128Gcm);
 
         self.transport.accept(key, algorithm).await
+    }
+
+    /// Get the server's bound address
+    pub fn local_addr(&self) -> Result<SocketAddr, NetworkError> {
+        self.transport.local_addr()
     }
 }
 
