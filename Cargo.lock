@@ -1432,6 +1432,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "nix",
+ "rosh-terminal",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

@@ -8,9 +8,10 @@ license.workspace = true
 [dependencies]
 nix = { workspace = true }
 libc = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "macros"] }
+tokio = { workspace = true, features = ["io-util", "macros", "fs"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+rosh-terminal = { path = "../rosh-terminal" }
 
 [dev-dependencies]
 tempfile = "3.10"

@@ -6,6 +6,9 @@
 pub mod pty;
 pub mod session;
 
+pub use pty::{Pty, PtyMaster, PtyProcess, AsyncPtyMaster};
+pub use session::{PtySession, SessionBuilder, SessionEvent};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -18,6 +21,9 @@ pub enum PtyError {
     
     #[error("PTY I/O error: {0}")]
     IoError(#[from] std::io::Error),
+    
+    #[error("Terminal error: {0}")]
+    TerminalError(#[from] rosh_terminal::TerminalError),
     
     #[error("Unsupported platform")]
     UnsupportedPlatform,
