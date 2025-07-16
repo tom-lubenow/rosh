@@ -6,6 +6,15 @@
 pub mod cipher;
 pub mod key_exchange;
 
+pub use cipher::{
+    Cipher, CipherAlgorithm, NonceGenerator,
+    create_cipher, TAG_SIZE, AES_GCM_NONCE_SIZE, CHACHA_NONCE_SIZE,
+};
+pub use key_exchange::{
+    generate_key, encode_key, decode_key, 
+    SessionInfo, KEY_ENV_VAR, get_key_from_env,
+};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
