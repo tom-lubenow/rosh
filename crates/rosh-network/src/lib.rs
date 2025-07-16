@@ -7,6 +7,10 @@ pub mod transport;
 pub mod protocol;
 pub mod connection;
 
+pub use transport::{RoshTransportConfig, ClientTransport, ServerTransport};
+pub use protocol::{Message, FramedCodec, MessageStats, PROTOCOL_VERSION};
+pub use connection::{ClientConnection, ServerConnection};
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -25,4 +29,7 @@ pub enum NetworkError {
     
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    
+    #[error("Crypto error: {0}")]
+    Crypto(#[from] rosh_crypto::CryptoError),
 }
