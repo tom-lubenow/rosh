@@ -9,23 +9,23 @@ pub struct TerminalState {
     /// Terminal dimensions
     pub width: u16,
     pub height: u16,
-    
+
     /// Screen content (flattened 2D array)
     pub screen: Vec<u8>,
-    
+
     /// Cursor position
     pub cursor_x: u16,
     pub cursor_y: u16,
-    
+
     /// Cursor visibility
     pub cursor_visible: bool,
-    
+
     /// Terminal title
     pub title: String,
-    
+
     /// Scrollback buffer
     pub scrollback: Vec<Vec<u8>>,
-    
+
     /// Terminal attributes (colors, styles, etc.)
     pub attributes: Vec<u8>,
 }
@@ -46,20 +46,21 @@ impl TerminalState {
             attributes: vec![0; screen_size],
         }
     }
-    
+
     /// Serialize state to bytes
     pub fn to_bytes(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         rkyv::to_bytes::<_, 1024>(self)
             .map(|b| b.to_vec())
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
-    
+
     /// Deserialize state from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         let archived = rkyv::check_archived_root::<Self>(bytes)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-        
-        archived.deserialize(&mut rkyv::Infallible)
+
+        archived
+            .deserialize(&mut rkyv::Infallible)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 }
