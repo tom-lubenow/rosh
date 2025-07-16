@@ -1,0 +1,57 @@
+[workspace]
+members = [
+    "crates/rosh",
+    "crates/rosh-crypto",
+    "crates/rosh-network",
+    "crates/rosh-terminal",
+    "crates/rosh-state",
+    "crates/rosh-pty",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Rosh Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/rosh"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+
+# Serialization
+rkyv = { version = "0.7", features = ["validation", "strict"] }
+
+# Crypto
+ring = "0.17"  # Pure Rust crypto, better than OpenSSL bindings
+aes-gcm = "0.10"  # For AES-GCM AEAD
+chacha20poly1305 = "0.10"  # Alternative cipher
+
+# Terminal handling
+vte = "0.13"  # Low-level parser from Alacritty
+vt100 = "0.15"  # Higher-level terminal state
+crossterm = "0.28"  # Cross-platform terminal manipulation
+
+# Networking
+quinn = "0.11"  # QUIC protocol (alternative to raw UDP)
+bytes = "1.7"
+
+# Utilities
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+
+# Compression
+zstd = "0.13"  # Better than zlib for our use case
+lz4_flex = "0.11"  # Very fast compression
+
+# OS interfaces
+nix = { version = "0.29", features = ["fs", "process", "signal", "term", "user"] }
+libc = "0.2"
+
+# Base64 (for key exchange)
+base64 = "0.22"

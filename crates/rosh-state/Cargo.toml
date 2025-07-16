@@ -1,0 +1,18 @@
+[package]
+name = "rosh-state"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rkyv = { workspace = true }
+bytes = { workspace = true }
+zstd = { workspace = true }
+lz4_flex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rosh-terminal = { path = "../rosh-terminal" }
+
+[dev-dependencies]
+criterion = "0.5"

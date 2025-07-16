@@ -1,0 +1,17 @@
+[package]
+name = "rosh-terminal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vte = { workspace = true }
+vt100 = { workspace = true }
+crossterm = { workspace = true }
+rkyv = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = "1.4"

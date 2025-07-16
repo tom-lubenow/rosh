@@ -1,0 +1,18 @@
+[package]
+name = "rosh-network"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+quinn = { workspace = true }
+bytes = { workspace = true }
+rkyv = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+rosh-crypto = { path = "../rosh-crypto" }
+
+[dev-dependencies]
+tokio-test = "0.4"

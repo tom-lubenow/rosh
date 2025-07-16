@@ -1,6 +1,26 @@
 [package]
 name = "rosh"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rosh"
+path = "src/bin/rosh.rs"
+
+[[bin]]
+name = "rosh-server"
+path = "src/bin/rosh-server.rs"
 
 [dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rosh-crypto = { path = "../rosh-crypto" }
+rosh-network = { path = "../rosh-network" }
+rosh-terminal = { path = "../rosh-terminal" }
+rosh-state = { path = "../rosh-state" }
+rosh-pty = { path = "../rosh-pty" }
