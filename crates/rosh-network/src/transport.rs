@@ -419,3 +419,7 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
         ]
     }
 }
+
+#[cfg(test)]
+#[path = "transport_test.rs"]
+mod transport_test;
