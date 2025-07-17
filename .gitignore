@@ -28,3 +28,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.log
+
+# Nix
+result
+result-*
+.direnv/
