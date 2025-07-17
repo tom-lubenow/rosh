@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::cert_validation::CertValidationMode;
     use quinn::VarInt;
     use rosh_crypto::{
         create_cipher, decode_key, encode_key, CipherAlgorithm, NonceGenerator, SessionInfo,
@@ -85,6 +86,7 @@ mod tests {
             max_idle_timeout: Duration::from_secs(60),
             initial_window: 1024 * 1024,
             stream_receive_window: VarInt::from_u32(512 * 1024),
+            cert_validation: CertValidationMode::SkipValidation,
         };
 
         // Test that we can create transports with custom config

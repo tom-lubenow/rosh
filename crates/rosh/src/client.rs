@@ -499,6 +499,7 @@ pub async fn run() -> Result<()> {
         max_idle_timeout: Duration::from_secs(args.keep_alive * 3),
         initial_window: 256 * 1024,
         stream_receive_window: VarInt::from_u32(256 * 1024),
+        cert_validation: rosh_network::CertValidationMode::default(),
     };
 
     // Connect to server
