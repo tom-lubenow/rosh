@@ -6,6 +6,7 @@ members = [
     "crates/rosh-terminal",
     "crates/rosh-state",
     "crates/rosh-pty",
+    "crates/rosh-test-utils",
 ]
 resolver = "2"
 
@@ -55,3 +56,14 @@ libc = "0.2"
 
 # Base64 (for key exchange)
 base64 = "0.22"
+
+# Testing dependencies
+proptest = "1.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+mockall = "0.12"
+test-case = "3.3"
+serial_test = "3.1"
+insta = { version = "1.39", features = ["yaml"] }
+tempfile = "3.10"
+portpicker = "0.1"
+regex = "1.10"

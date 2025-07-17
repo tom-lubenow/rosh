@@ -201,7 +201,7 @@ mod tests {
         let decoded = Message::from_bytes(&bytes).unwrap();
 
         match decoded {
-            Message::Ping => {},
+            Message::Ping => {}
             _ => panic!("Wrong message type"),
         }
     }
@@ -234,7 +234,7 @@ mod tests {
         // Decode second message
         let decoded2 = FramedCodec::decode(&mut buf).unwrap().unwrap();
         match decoded2 {
-            Message::Ping => {},
+            Message::Ping => {}
             _ => panic!("Wrong message type"),
         }
 

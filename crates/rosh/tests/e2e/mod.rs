@@ -1,0 +1,9 @@
+mod authentication_tests;
+mod basic_connection;
+mod network_resilience;
+mod performance_tests;
+mod protocol_tests;
+mod security_tests;
+mod session_tests;
+mod stress_tests;
+mod terminal_emulation;

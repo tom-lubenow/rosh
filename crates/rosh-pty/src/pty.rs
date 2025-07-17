@@ -198,6 +198,20 @@ impl PtyProcess {
         }
     }
 
+    /// Try to wait for the process to exit without blocking
+    pub fn try_wait(&self) -> Result<Option<i32>, PtyError> {
+        use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+
+        match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG))
+            .map_err(|e| PtyError::IoError(io::Error::from_raw_os_error(e as i32)))?
+        {
+            WaitStatus::Exited(_, code) => Ok(Some(code)),
+            WaitStatus::Signaled(_, signal, _) => Ok(Some(128 + signal as i32)),
+            WaitStatus::StillAlive => Ok(None),
+            _ => Ok(Some(-1)),
+        }
+    }
+
     /// Kill the process
     pub fn kill(&self) -> Result<(), PtyError> {
         nix::sys::signal::kill(self.child_pid, nix::sys::signal::Signal::SIGTERM)

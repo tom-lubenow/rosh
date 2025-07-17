@@ -30,3 +30,7 @@ base64 = { workspace = true }
 rkyv = { workspace = true }
 rcgen = "0.11"
 rand = "0.8"
+
+[dev-dependencies]
+rosh-test-utils = { path = "../rosh-test-utils" }
+futures = "0.3"

@@ -342,6 +342,8 @@ async fn handle_connection(
         })
         .await?;
 
+    info!("Client connected successfully from {}", client_addr);
+
     // Get session reference
     let session = server_state
         .get_session(&session_id)
