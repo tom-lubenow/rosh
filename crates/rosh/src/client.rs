@@ -656,11 +656,26 @@ async fn run_client_loop(
                                 // Send acknowledgment
                                 connection.send(NetworkMessage::StateAck(seq)).await?;
                             }
-                            StateMessage::Delta { seq: _, delta: _ } => {
-                                // For now, just request full state on delta
-                                // TODO: Implement proper delta handling
-                                warn!("Delta updates not yet implemented, requesting full state");
-                                connection.send(NetworkMessage::StateRequest).await?;
+                            StateMessage::Delta { seq, delta } => {
+                                // Apply delta to current state
+                                let mut sync = state_sync.write().await;
+                                match delta.apply(sync.current_state()) {
+                                    Ok(new_state) => {
+                                        // Update the synchronizer with the new state
+                                        *sync = StateSynchronizer::new(new_state, false);
+
+                                        // Send acknowledgment
+                                        drop(sync); // Release the write lock before sending
+                                        connection.send(NetworkMessage::StateAck(seq)).await?;
+
+                                        debug!("Applied delta update seq={}", seq);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to apply delta: {}, requesting full state", e);
+                                        drop(sync); // Release the write lock before sending
+                                        connection.send(NetworkMessage::StateRequest).await?;
+                                    }
+                                }
                             }
                             StateMessage::Ack(seq) => {
                                 let mut sync = state_sync.write().await;
