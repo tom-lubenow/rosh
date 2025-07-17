@@ -3,10 +3,12 @@
 //! Provides reliable, encrypted communication over UDP using QUIC protocol.
 //! Falls back to custom UDP protocol if QUIC is not available.
 
+pub mod cert_validation;
 pub mod connection;
 pub mod protocol;
 pub mod transport;
 
+pub use cert_validation::{create_cert_verifier, CertValidationMode};
 pub use connection::{ClientConnection, Connection, QuicConnection, ServerConnection};
 pub use protocol::{FramedCodec, Message, MessageStats, PROTOCOL_VERSION};
 pub use quinn::VarInt;

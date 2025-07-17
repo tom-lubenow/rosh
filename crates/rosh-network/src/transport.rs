@@ -7,6 +7,7 @@
 //! - 0-RTT resumption
 
 use crate::{
+    cert_validation::{create_cert_verifier, CertValidationMode},
     connection::{Connection as ConnectionTrait, QuicConnection},
     NetworkError,
 };
@@ -65,6 +66,8 @@ pub struct RoshTransportConfig {
     pub initial_window: u32,
     /// Stream receive window
     pub stream_receive_window: VarInt,
+    /// Certificate validation mode
+    pub cert_validation: CertValidationMode,
 }
 
 impl Default for RoshTransportConfig {
@@ -74,6 +77,7 @@ impl Default for RoshTransportConfig {
             max_idle_timeout: Duration::from_secs(30),
             initial_window: 20,                                   // packets
             stream_receive_window: VarInt::from_u32(1024 * 1024), // 1 MB
+            cert_validation: CertValidationMode::default(),
         }
     }
 }
@@ -233,10 +237,14 @@ impl IncomingConnection {
 
 /// Create client configuration
 fn create_client_config(config: RoshTransportConfig) -> Result<ClientConfig, NetworkError> {
-    // For development, accept any certificate
+    // Create certificate verifier based on config
+    let cert_verifier = create_cert_verifier(config.cert_validation.clone()).map_err(|e| {
+        NetworkError::TransportError(format!("Failed to create cert verifier: {e}"))
+    })?;
+
     let mut client_crypto = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+        .with_custom_certificate_verifier(cert_verifier)
         .with_no_client_auth();
 
     client_crypto.alpn_protocols = vec![ALPN_ROSH.to_vec()];
@@ -307,11 +315,6 @@ fn create_transport_config(config: RoshTransportConfig) -> quinn::TransportConfi
     transport
 }
 
-/// Skip certificate verification for development
-/// TODO: Implement proper certificate validation for production
-#[derive(Debug)]
-struct SkipServerVerification;
-
 /// Wrapper for client transport that provides connection method
 pub struct ClientTransportWrapper {
     transport: ClientTransport,
@@ -378,45 +381,6 @@ impl ServerTransportWrapper {
     /// Get the server's bound address
     pub fn local_addr(&self) -> Result<SocketAddr, NetworkError> {
         self.transport.local_addr()
-    }
-}
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ED25519,
-        ]
     }
 }
 
