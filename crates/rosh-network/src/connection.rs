@@ -152,6 +152,10 @@ impl QuicConnection {
     }
 }
 
+#[cfg(test)]
+#[path = "connection_test.rs"]
+mod connection_test;
+
 #[async_trait]
 impl Connection for QuicConnection {
     async fn send(&mut self, msg: Message) -> Result<(), NetworkError> {
