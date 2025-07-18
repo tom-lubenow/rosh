@@ -314,4 +314,239 @@ mod tests {
         assert!(debug_str.contains("cursor_x: 0"));
         assert!(debug_str.contains("cursor_y: 0"));
     }
+
+    #[test]
+    fn test_terminal_state_maximum_dimensions() {
+        // Test with maximum u16 dimensions
+        let max_dim = u16::MAX;
+        let state = TerminalState::new(max_dim, 1);
+        assert_eq!(state.width, max_dim);
+        assert_eq!(state.height, 1);
+        // Screen size would be u16::MAX * 1 = 65535 bytes
+        assert_eq!(state.screen.len(), max_dim as usize);
+
+        // Test that we can handle reasonably large dimensions
+        let large = TerminalState::new(1000, 1000);
+        assert_eq!(large.screen.len(), 1_000_000);
+        assert_eq!(large.attributes.len(), 1_000_000);
+    }
+
+    #[test]
+    fn test_terminal_state_cursor_overflow() {
+        // Test cursor positions that might overflow
+        let mut state = TerminalState::new(100, 100);
+
+        // Set cursor to maximum valid position
+        state.cursor_x = 99;
+        state.cursor_y = 99;
+
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+
+        assert_eq!(restored.cursor_x, 99);
+        assert_eq!(restored.cursor_y, 99);
+
+        // Test with cursor positions beyond screen bounds
+        // (This is allowed by the data structure, bounds checking would be in emulator)
+        state.cursor_x = 200;
+        state.cursor_y = 200;
+
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+
+        assert_eq!(restored.cursor_x, 200);
+        assert_eq!(restored.cursor_y, 200);
+    }
+
+    #[test]
+    fn test_terminal_state_concurrent_serialization() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let state = Arc::new(TerminalState::new(80, 24));
+        let mut handles = vec![];
+
+        // Spawn multiple threads to serialize the same state
+        for _ in 0..10 {
+            let state_clone = Arc::clone(&state);
+            let handle = thread::spawn(move || {
+                for _ in 0..100 {
+                    let bytes = state_clone.to_bytes().expect("Should serialize");
+                    let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+                    assert_eq!(restored, *state_clone);
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+    }
+
+    #[test]
+    fn test_terminal_state_partial_screen_modifications() {
+        let mut state = TerminalState::new(10, 10);
+
+        // Modify screen in patterns
+        for y in 0..10 {
+            for x in 0..10 {
+                let index = y * 10 + x;
+                if (x + y) % 2 == 0 {
+                    state.screen[index] = b'#';
+                    state.attributes[index] = 0xFF;
+                }
+            }
+        }
+
+        // Verify checkerboard pattern
+        for y in 0..10 {
+            for x in 0..10 {
+                let index = y * 10 + x;
+                if (x + y) % 2 == 0 {
+                    assert_eq!(state.screen[index], b'#');
+                    assert_eq!(state.attributes[index], 0xFF);
+                } else {
+                    assert_eq!(state.screen[index], b' ');
+                    assert_eq!(state.attributes[index], 0);
+                }
+            }
+        }
+
+        // Serialize and verify pattern is preserved
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+        assert_eq!(restored.screen, state.screen);
+        assert_eq!(restored.attributes, state.attributes);
+    }
+
+    #[test]
+    fn test_terminal_state_scrollback_limits() {
+        let mut state = TerminalState::new(80, 24);
+
+        // Add a very large scrollback buffer
+        for i in 0..10000 {
+            let line =
+                format!("This is scrollback line {i} with some extra content to make it longer");
+            state.scrollback.push(line.into_bytes());
+        }
+
+        assert_eq!(state.scrollback.len(), 10000);
+
+        // Serialize - this tests handling of large data
+        let bytes = state.to_bytes().expect("Should serialize");
+        assert!(bytes.len() > 10000); // Should be reasonably large
+
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+        assert_eq!(restored.scrollback.len(), 10000);
+
+        // Verify some samples
+        assert!(restored.scrollback[0].starts_with(b"This is scrollback line 0"));
+        assert!(restored.scrollback[9999].starts_with(b"This is scrollback line 9999"));
+    }
+
+    #[test]
+    fn test_terminal_state_attribute_combinations() {
+        let mut state = TerminalState::new(5, 5);
+
+        // Test all possible attribute combinations for a small area
+        for i in 0..25 {
+            state.attributes[i] = i as u8;
+            state.screen[i] = b'A' + (i as u8 % 26);
+        }
+
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+
+        // Verify all attributes are preserved exactly
+        for i in 0..25 {
+            assert_eq!(restored.attributes[i], i as u8);
+            assert_eq!(restored.screen[i], b'A' + (i as u8 % 26));
+        }
+    }
+
+    #[test]
+    fn test_terminal_state_title_edge_cases() {
+        let mut state = TerminalState::new(80, 24);
+
+        // Test empty title (already covered but let's be explicit)
+        state.title = String::new();
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+        assert_eq!(restored.title, "");
+
+        // Test very long title
+        state.title = "A".repeat(10000);
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+        assert_eq!(restored.title.len(), 10000);
+        assert!(restored.title.chars().all(|c| c == 'A'));
+
+        // Test title with special characters
+        state.title = "\0\n\r\t\x1b[31mRed\x1b[0m".to_string();
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+        assert_eq!(restored.title, "\0\n\r\t\x1b[31mRed\x1b[0m");
+    }
+
+    #[test]
+    fn test_terminal_state_mixed_content() {
+        let mut state = TerminalState::new(40, 20);
+
+        // Fill with mixed ASCII and high bytes
+        for i in 0..state.screen.len() {
+            state.screen[i] = (i % 256) as u8;
+            state.attributes[i] = ((i / 256) % 256) as u8;
+        }
+
+        // Add diverse scrollback
+        state.scrollback.push(vec![0u8; 100]); // All nulls
+        state.scrollback.push(vec![255u8; 100]); // All 0xFF
+        state.scrollback.push((0..=255).collect()); // All byte values
+
+        // Complex title
+        state.title = format!(
+            "Test {} Terminal {}",
+            char::from_u32(0x1F980).unwrap(),
+            "🔧"
+        );
+
+        // Cursor at specific position
+        state.cursor_x = 39;
+        state.cursor_y = 19;
+        state.cursor_visible = false;
+
+        let bytes = state.to_bytes().expect("Should serialize");
+        let restored = TerminalState::from_bytes(&bytes).expect("Should deserialize");
+
+        // Verify everything is preserved
+        assert_eq!(restored.screen, state.screen);
+        assert_eq!(restored.attributes, state.attributes);
+        assert_eq!(restored.scrollback, state.scrollback);
+        assert_eq!(restored.title, state.title);
+        assert_eq!(restored.cursor_x, 39);
+        assert_eq!(restored.cursor_y, 19);
+        assert!(!restored.cursor_visible);
+    }
+
+    #[test]
+    fn test_terminal_state_serialization_stability() {
+        // Test that serializing the same state multiple times produces the same bytes
+        let mut state = TerminalState::new(80, 24);
+        state.cursor_x = 10;
+        state.cursor_y = 5;
+        state.title = "Stable".to_string();
+        state.screen[100] = b'X';
+        state.attributes[100] = 42;
+        state.scrollback.push(vec![b'T', b'e', b's', b't']);
+
+        let bytes1 = state.to_bytes().expect("Should serialize");
+        let bytes2 = state.to_bytes().expect("Should serialize");
+        let bytes3 = state.to_bytes().expect("Should serialize");
+
+        // All serializations should produce identical bytes
+        assert_eq!(bytes1, bytes2);
+        assert_eq!(bytes2, bytes3);
+    }
 }
