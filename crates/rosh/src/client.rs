@@ -765,3 +765,256 @@ pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
         _ => vec![],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_args_parsing_basic() {
+        // Test basic server argument
+        let args = Args::try_parse_from(["rosh", "example.com"]).unwrap();
+        assert_eq!(args.server, "example.com");
+        assert_eq!(args.key, None);
+        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm); // default
+        assert_eq!(args.compression, None);
+        assert_eq!(args.keep_alive, 30);
+        assert_eq!(args.ssh_port, 22);
+        assert_eq!(args.remote_command, "rosh-server");
+        assert!(!args.predict);
+        assert!(args.ssh_options.is_empty());
+    }
+
+    #[test]
+    fn test_args_parsing_with_key() {
+        let args = Args::try_parse_from(["rosh", "--key", "abc123", "localhost:8080"]).unwrap();
+        assert_eq!(args.server, "localhost:8080");
+        assert_eq!(args.key, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_args_parsing_cipher_options() {
+        // Test AES-128-GCM (default)
+        let args = Args::try_parse_from(["rosh", "--cipher", "aes-gcm", "server"]).unwrap();
+        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm);
+
+        // Test AES-256-GCM
+        let args = Args::try_parse_from(["rosh", "--cipher", "aes-256-gcm", "server"]).unwrap();
+        assert_eq!(args.cipher, CipherAlgorithm::Aes256Gcm);
+
+        // Test ChaCha20-Poly1305
+        let args =
+            Args::try_parse_from(["rosh", "--cipher", "chacha20-poly1305", "server"]).unwrap();
+        assert_eq!(args.cipher, CipherAlgorithm::ChaCha20Poly1305);
+
+        // Test short form
+        let args = Args::try_parse_from(["rosh", "-a", "aes-gcm", "server"]).unwrap();
+        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm);
+    }
+
+    #[test]
+    fn test_args_parsing_compression() {
+        // Test zstd compression
+        let args = Args::try_parse_from(["rosh", "--compression", "zstd", "server"]).unwrap();
+        assert_eq!(args.compression, Some(CompressionAlgorithm::Zstd));
+
+        // Test lz4 compression
+        let args = Args::try_parse_from(["rosh", "--compression", "lz4", "server"]).unwrap();
+        assert_eq!(args.compression, Some(CompressionAlgorithm::Lz4));
+    }
+
+    #[test]
+    fn test_args_parsing_ssh_options() {
+        let args = Args::try_parse_from([
+            "rosh",
+            "--ssh-port",
+            "2222",
+            "--remote-command",
+            "custom-server",
+            "--ssh-options",
+            "StrictHostKeyChecking=no",
+            "--ssh-options",
+            "UserKnownHostsFile=/dev/null",
+            "user@host",
+        ])
+        .unwrap();
+
+        assert_eq!(args.ssh_port, 2222);
+        assert_eq!(args.remote_command, "custom-server");
+        assert_eq!(
+            args.ssh_options,
+            vec!["StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null"]
+        );
+    }
+
+    #[test]
+    fn test_args_parsing_predict_flag() {
+        let args = Args::try_parse_from(["rosh", "--predict", "server"]).unwrap();
+        assert!(args.predict);
+    }
+
+    #[test]
+    fn test_args_parsing_keep_alive() {
+        let args = Args::try_parse_from(["rosh", "--keep-alive", "60", "server"]).unwrap();
+        assert_eq!(args.keep_alive, 60);
+    }
+
+    #[test]
+    fn test_args_parsing_log_levels() {
+        let log_levels = vec![
+            ("trace", LogLevel::Trace),
+            ("debug", LogLevel::Debug),
+            ("info", LogLevel::Info),
+            ("warn", LogLevel::Warn),
+            ("error", LogLevel::Error),
+        ];
+
+        for (level_str, expected) in log_levels {
+            let args = Args::try_parse_from(["rosh", "--log-level", level_str, "server"]).unwrap();
+            match (args.log_level, expected) {
+                (LogLevel::Trace, LogLevel::Trace) => {}
+                (LogLevel::Debug, LogLevel::Debug) => {}
+                (LogLevel::Info, LogLevel::Info) => {}
+                (LogLevel::Warn, LogLevel::Warn) => {}
+                (LogLevel::Error, LogLevel::Error) => {}
+                _ => panic!("Log level mismatch"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_args_parsing_invalid() {
+        // Missing server argument
+        assert!(Args::try_parse_from(["rosh"]).is_err());
+
+        // Invalid cipher
+        assert!(Args::try_parse_from(["rosh", "--cipher", "invalid", "server"]).is_err());
+
+        // Invalid compression
+        assert!(Args::try_parse_from(["rosh", "--compression", "invalid", "server"]).is_err());
+
+        // Invalid log level
+        assert!(Args::try_parse_from(["rosh", "--log-level", "invalid", "server"]).is_err());
+
+        // Invalid keep-alive (not a number)
+        assert!(Args::try_parse_from(["rosh", "--keep-alive", "not-a-number", "server"]).is_err());
+    }
+
+    #[test]
+    fn test_args_parsing_help() {
+        // Test that help flag works
+        let result = Args::try_parse_from(["rosh", "--help"]);
+        assert!(result.is_err()); // Help causes a special error
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn test_args_parsing_version() {
+        // Test that version flag works
+        let result = Args::try_parse_from(["rosh", "--version"]);
+        assert!(result.is_err()); // Version causes a special error
+
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn test_log_level_to_tracing() {
+        // Test conversion from our LogLevel to tracing::Level
+        let conversions = vec![
+            (LogLevel::Trace, tracing::Level::TRACE),
+            (LogLevel::Debug, tracing::Level::DEBUG),
+            (LogLevel::Info, tracing::Level::INFO),
+            (LogLevel::Warn, tracing::Level::WARN),
+            (LogLevel::Error, tracing::Level::ERROR),
+        ];
+
+        for (log_level, expected_tracing) in conversions {
+            let actual = match log_level {
+                LogLevel::Trace => tracing::Level::TRACE,
+                LogLevel::Debug => tracing::Level::DEBUG,
+                LogLevel::Info => tracing::Level::INFO,
+                LogLevel::Warn => tracing::Level::WARN,
+                LogLevel::Error => tracing::Level::ERROR,
+            };
+            assert_eq!(actual, expected_tracing);
+        }
+    }
+
+    #[test]
+    fn test_terminal_ui_dimensions() {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let state = TerminalState::new(120, 40);
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(state, false)));
+
+        let ui = TerminalUI::new(120, 40, state_sync, true);
+        assert_eq!(ui.terminal.framebuffer().width(), 120);
+        assert_eq!(ui.terminal.framebuffer().height(), 40);
+        assert!(ui.prediction_enabled);
+    }
+
+    #[test]
+    fn test_parse_server_arg_comprehensive() {
+        // Test various edge cases
+
+        // Empty string
+        let (is_ssh, user, host) = parse_server_arg("");
+        assert!(is_ssh);
+        assert_eq!(user, None);
+        assert_eq!(host, "");
+
+        // Just @ symbol
+        let (is_ssh, user, host) = parse_server_arg("@");
+        assert!(is_ssh);
+        assert_eq!(user, Some("".to_string()));
+        assert_eq!(host, "");
+
+        // Multiple colons (IPv6-like but not in brackets)
+        let (is_ssh, user, host) = parse_server_arg("fe80::1:8080");
+        assert!(!is_ssh);
+        assert_eq!(user, None);
+        assert_eq!(host, "fe80::1:8080");
+
+        // User with special characters
+        let (is_ssh, user, host) = parse_server_arg("user-name_123@host");
+        assert!(is_ssh);
+        assert_eq!(user, Some("user-name_123".to_string()));
+        assert_eq!(host, "host");
+    }
+
+    #[test]
+    fn test_cipher_algorithm_conversion() {
+        // Test conversion from u8 to CipherAlgorithm
+        let valid_conversions = vec![
+            (0u8, CipherAlgorithm::Aes128Gcm),
+            (1u8, CipherAlgorithm::Aes256Gcm),
+            (2u8, CipherAlgorithm::ChaCha20Poly1305),
+        ];
+
+        for (byte, expected) in valid_conversions {
+            let result = match byte {
+                0 => Ok(CipherAlgorithm::Aes128Gcm),
+                1 => Ok(CipherAlgorithm::Aes256Gcm),
+                2 => Ok(CipherAlgorithm::ChaCha20Poly1305),
+                _ => Err(anyhow::anyhow!("Unknown cipher algorithm: {}", byte)),
+            };
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), expected);
+        }
+
+        // Test invalid cipher algorithm
+        let invalid: u8 = 255;
+        let result = match invalid {
+            0 => Ok(CipherAlgorithm::Aes128Gcm),
+            1 => Ok(CipherAlgorithm::Aes256Gcm),
+            2 => Ok(CipherAlgorithm::ChaCha20Poly1305),
+            _ => Err(anyhow::anyhow!("Unknown cipher algorithm: {}", invalid)),
+        };
+        assert!(result.is_err());
+    }
+}
