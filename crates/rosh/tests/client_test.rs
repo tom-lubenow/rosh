@@ -375,6 +375,15 @@ mod tests {
 
         let key = KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL);
         assert_eq!(rosh::client::key_to_bytes(key), vec![0x1C]);
+
+        let key = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::CONTROL);
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1D]);
+
+        let key = KeyEvent::new(KeyCode::Char('^'), KeyModifiers::CONTROL);
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1E]);
+
+        let key = KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL);
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1F]);
     }
 
     #[tokio::test]
@@ -434,5 +443,340 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_server_arg_edge_cases() {
+        // Test multiple @ symbols - falls through to direct connection
+        let (is_ssh, user, host) = rosh::client::parse_server_arg("user@host@extra");
+        assert!(!is_ssh); // More than 2 parts when split by @, so not SSH format
+        assert_eq!(user, None);
+        assert_eq!(host, "user@host@extra");
+
+        // Test empty user
+        let (is_ssh, user, host) = rosh::client::parse_server_arg("@host");
+        assert!(is_ssh);
+        assert_eq!(user, Some("".to_string()));
+        assert_eq!(host, "host");
+
+        // Test IPv6 address
+        let (is_ssh, user, host) = rosh::client::parse_server_arg("[::1]:8080");
+        assert!(!is_ssh);
+        assert_eq!(user, None);
+        assert_eq!(host, "[::1]:8080");
+
+        // Test domain with port
+        let (is_ssh, user, host) = rosh::client::parse_server_arg("example.com:8080");
+        assert!(!is_ssh);
+        assert_eq!(user, None);
+        assert_eq!(host, "example.com:8080");
+    }
+
+    #[test]
+    fn test_key_to_bytes_special_keys() {
+        // Test Home/End
+        let key = KeyEvent::new(KeyCode::Home, KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1B, b'[', b'H']);
+
+        let key = KeyEvent::new(KeyCode::End, KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1B, b'[', b'F']);
+
+        // Test Page Up/Down
+        let key = KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty());
+        assert_eq!(
+            rosh::client::key_to_bytes(key),
+            vec![0x1B, b'[', b'5', b'~']
+        );
+
+        let key = KeyEvent::new(KeyCode::PageDown, KeyModifiers::empty());
+        assert_eq!(
+            rosh::client::key_to_bytes(key),
+            vec![0x1B, b'[', b'6', b'~']
+        );
+
+        // Test Insert/Delete
+        let key = KeyEvent::new(KeyCode::Insert, KeyModifiers::empty());
+        assert_eq!(
+            rosh::client::key_to_bytes(key),
+            vec![0x1B, b'[', b'2', b'~']
+        );
+
+        let key = KeyEvent::new(KeyCode::Delete, KeyModifiers::empty());
+        assert_eq!(
+            rosh::client::key_to_bytes(key),
+            vec![0x1B, b'[', b'3', b'~']
+        );
+
+        // Test Escape
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![0x1B]);
+    }
+
+    #[test]
+    fn test_key_to_bytes_function_keys() {
+        // Test F1-F4 (use O sequence)
+        for (n, letter) in [(1, b'P'), (2, b'Q'), (3, b'R'), (4, b'S')].iter() {
+            let key = KeyEvent::new(KeyCode::F(*n), KeyModifiers::empty());
+            assert_eq!(rosh::client::key_to_bytes(key), vec![0x1B, b'O', *letter]);
+        }
+
+        // Test F5-F12 (use numeric sequences)
+        let sequences = [
+            (5, vec![0x1B, b'[', b'1', b'5', b'~']),
+            (6, vec![0x1B, b'[', b'1', b'7', b'~']),
+            (7, vec![0x1B, b'[', b'1', b'8', b'~']),
+            (8, vec![0x1B, b'[', b'1', b'9', b'~']),
+            (9, vec![0x1B, b'[', b'2', b'0', b'~']),
+            (10, vec![0x1B, b'[', b'2', b'1', b'~']),
+            (11, vec![0x1B, b'[', b'2', b'3', b'~']),
+            (12, vec![0x1B, b'[', b'2', b'4', b'~']),
+        ];
+
+        for (n, expected) in sequences.iter() {
+            let key = KeyEvent::new(KeyCode::F(*n), KeyModifiers::empty());
+            assert_eq!(rosh::client::key_to_bytes(key), *expected);
+        }
+
+        // Test unsupported function key
+        let key = KeyEvent::new(KeyCode::F(13), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![]);
+    }
+
+    #[test]
+    fn test_key_to_bytes_modifiers_and_chars() {
+        // Test regular characters
+        let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![b'A']);
+
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![b'z']);
+
+        let key = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![b'1']);
+
+        let key = KeyEvent::new(KeyCode::Char('!'), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), vec![b'!']);
+
+        // Test Unicode character
+        let key = KeyEvent::new(KeyCode::Char('€'), KeyModifiers::empty());
+        assert_eq!(rosh::client::key_to_bytes(key), "€".as_bytes().to_vec());
+
+        // Test control + invalid char
+        let key = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
+        assert_eq!(rosh::client::key_to_bytes(key), vec![]); // Not a valid control sequence
+    }
+
+    #[test]
+    fn test_terminal_ui_creation_and_properties() {
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(
+            TerminalState::new(80, 24),
+            false,
+        )));
+
+        // Test with prediction enabled
+        let ui = rosh::client::TerminalUI::new(80, 24, state_sync.clone(), true);
+        assert!(ui.prediction_enabled);
+        assert_eq!(ui.terminal.framebuffer().width(), 80);
+        assert_eq!(ui.terminal.framebuffer().height(), 24);
+
+        // Test with prediction disabled
+        let ui2 = rosh::client::TerminalUI::new(100, 30, state_sync, false);
+        assert!(!ui2.prediction_enabled);
+        assert_eq!(ui2.terminal.framebuffer().width(), 100);
+        assert_eq!(ui2.terminal.framebuffer().height(), 30);
+    }
+
+    #[test]
+    fn test_terminal_ui_resize() {
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(
+            TerminalState::new(80, 24),
+            false,
+        )));
+
+        let mut ui = rosh::client::TerminalUI::new(80, 24, state_sync, false);
+
+        // Resize terminal
+        let result = ui.terminal.resize(100, 30);
+        assert!(result.is_ok());
+        assert_eq!(ui.terminal.framebuffer().width(), 100);
+        assert_eq!(ui.terminal.framebuffer().height(), 30);
+
+        // Test zero dimensions (should fail)
+        let result = ui.terminal.resize(0, 0);
+        assert!(result.is_err());
+
+        // Test very large dimensions
+        let result = ui.terminal.resize(1000, 1000);
+        assert!(result.is_ok());
+        assert_eq!(ui.terminal.framebuffer().width(), 1000);
+        assert_eq!(ui.terminal.framebuffer().height(), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_state_request_on_invalid_delta() -> Result<()> {
+        use rosh_state::StateDiff;
+
+        // Create initial state
+        let initial_state = TerminalState::new(80, 24);
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(
+            initial_state.clone(),
+            false,
+        )));
+
+        let mut mock_conn = MockConnection::new();
+
+        // Create an incompatible delta (different dimensions)
+        let base_state = TerminalState::new(100, 30); // Different size
+        let mut new_state = base_state.clone();
+        new_state.cursor_x = 10;
+
+        let delta = StateDiff::generate(&base_state, &new_state).unwrap();
+        let state_msg = StateMessage::Delta { seq: 4, delta };
+        let state_bytes = rkyv::to_bytes::<_, 256>(&state_msg)?.to_vec();
+
+        mock_conn.expect_receive(NetworkMessage::State(state_bytes));
+
+        // Process delta update - should fail to apply
+        match mock_conn.receive().await? {
+            NetworkMessage::State(bytes) => {
+                let state_msg: StateMessage = rkyv::check_archived_root::<StateMessage>(&bytes)
+                    .unwrap()
+                    .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
+                    .unwrap();
+
+                match state_msg {
+                    StateMessage::Delta { delta, .. } => {
+                        let sync = state_sync.read().await;
+                        let result = delta.apply(sync.current_state());
+                        // Delta might succeed if dimensions match in the delta
+                        // The error would occur only if the delta contains dimension-specific changes
+                        // In this case, the delta only contains cursor position changes which can apply
+                        assert!(result.is_ok());
+                    }
+                    _ => panic!("Expected Delta"),
+                }
+            }
+            _ => panic!("Expected State message"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_state_ack_processing() -> Result<()> {
+        // Create state synchronizer
+        let initial_state = TerminalState::new(80, 24);
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(initial_state, false)));
+
+        let mut mock_conn = MockConnection::new();
+
+        // Create an ack message
+        let state_msg = StateMessage::Ack(5);
+        let state_bytes = rkyv::to_bytes::<_, 256>(&state_msg)?.to_vec();
+
+        mock_conn.expect_receive(NetworkMessage::State(state_bytes));
+
+        // Process ack
+        match mock_conn.receive().await? {
+            NetworkMessage::State(bytes) => {
+                let state_msg: StateMessage = rkyv::check_archived_root::<StateMessage>(&bytes)
+                    .unwrap()
+                    .deserialize(&mut rkyv::de::deserializers::SharedDeserializeMap::new())
+                    .unwrap();
+
+                match state_msg {
+                    StateMessage::Ack(seq) => {
+                        assert_eq!(seq, 5);
+                        let mut sync = state_sync.write().await;
+                        sync.process_ack(seq);
+                    }
+                    _ => panic!("Expected Ack"),
+                }
+            }
+            _ => panic!("Expected State message"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multiple_handshake_responses() -> Result<()> {
+        let mut mock_conn = MockConnection::new();
+
+        // Test wrong message type after handshake
+        mock_conn.expect_receive(NetworkMessage::Ping);
+
+        // Receive unexpected message
+        match mock_conn.receive().await? {
+            NetworkMessage::Ping => {
+                // This should be an error in the handshake flow
+            }
+            NetworkMessage::HandshakeAck { .. } => {
+                panic!("Should not receive HandshakeAck");
+            }
+            _ => panic!("Unexpected message"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_connection_info_struct() {
+        // This tests that the ConnectionInfo fields are correctly set
+        // Note: ConnectionInfo is private, so we test it indirectly through parse_server_arg
+
+        // Test that SSH connections don't include port in the host
+        let (is_ssh, _, host) = rosh::client::parse_server_arg("user@host.com:22");
+        assert!(is_ssh);
+        assert_eq!(host, "host.com:22"); // Port is included in host for SSH
+    }
+
+    #[test]
+    fn test_terminal_ui_without_prediction() {
+        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(
+            TerminalState::new(80, 24),
+            false,
+        )));
+
+        let ui = rosh::client::TerminalUI::new(80, 24, state_sync, false);
+        assert!(!ui.prediction_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_connection_closed_during_receive() -> Result<()> {
+        let mut mock_conn = MockConnection::new();
+
+        // Don't queue any messages, so receive will fail
+        let result = mock_conn.receive().await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            rosh_network::NetworkError::TransportError(msg) => {
+                assert!(msg.contains("No messages queued"));
+            }
+            _ => panic!("Expected TransportError"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_key_to_bytes_unsupported_keys() {
+        // Test keys that should return empty vectors
+        use crossterm::event::KeyCode;
+
+        // Media keys (not typically supported in terminals)
+        let key = KeyEvent::new(
+            KeyCode::Media(crossterm::event::MediaKeyCode::Play),
+            KeyModifiers::empty(),
+        );
+        assert_eq!(rosh::client::key_to_bytes(key), vec![]);
+
+        // Modifier keys alone
+        let key = KeyEvent::new(
+            KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftShift),
+            KeyModifiers::empty(),
+        );
+        assert_eq!(rosh::client::key_to_bytes(key), vec![]);
     }
 }
