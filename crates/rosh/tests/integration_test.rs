@@ -1,6 +1,6 @@
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::time::sleep;
 
 /// Test that the server binary can start and bind to a port
 #[tokio::test]
@@ -25,16 +25,49 @@ async fn test_server_startup() {
             "--bind",
             "127.0.0.1:0",
         ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
         .expect("Failed to start server");
 
-    // Give it time to start
-    sleep(Duration::from_millis(500)).await;
+    // Wait for server to output that it's ready
+    let stdout = server.stdout.take().expect("Failed to get stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    // Use a timeout to prevent hanging forever
+    let timeout_duration = Duration::from_secs(5);
+    let start = tokio::time::Instant::now();
+
+    let mut server_ready = false;
+    while start.elapsed() < timeout_duration {
+        match reader.read_line(&mut line).await {
+            Ok(0) => {
+                // EOF - process may have exited
+                break;
+            }
+            Ok(_) => {
+                // Check if line indicates server is ready
+                // Look for ROSH_PORT or similar startup message
+                if line.contains("ROSH_PORT=") || line.contains("Listening on") {
+                    server_ready = true;
+                    break;
+                }
+                line.clear();
+            }
+            Err(e) => {
+                panic!("Failed to read server output: {e}");
+            }
+        }
+    }
 
     // Check if process is still running
     match server.try_wait() {
         Ok(None) => {
+            if !server_ready {
+                panic!("Server started but didn't output ready message within timeout");
+            }
             // Process is still running - good
             server.kill().await.ok();
         }

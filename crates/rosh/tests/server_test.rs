@@ -122,13 +122,26 @@ mod tests {
                 .kill_on_drop(true)
                 .spawn()?;
 
-            // Give it a moment to start
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Check server started by reading its output
+            let stdout = server.stdout.take().unwrap();
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
 
-            // Should start successfully
+            // Wait for server to indicate it's ready
+            let ready = timeout(Duration::from_secs(2), async {
+                while reader.read_line(&mut line).await? > 0 {
+                    if line.contains("ROSH_PORT=") || line.contains("Listening") {
+                        return Ok::<_, anyhow::Error>(true);
+                    }
+                    line.clear();
+                }
+                Ok(false)
+            })
+            .await??;
+
             assert!(
-                server.try_wait()?.is_none(),
-                "Server should still be running with cipher {cipher}"
+                ready || server.try_wait()?.is_none(),
+                "Server should start successfully with cipher {cipher}"
             );
 
             server.kill().await?;
@@ -152,12 +165,25 @@ mod tests {
             .kill_on_drop(true)
             .spawn()?;
 
-        // Give it a moment to start
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Check server started by reading its output
+        let stdout = server.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
 
-        // Should start successfully
+        // Wait for server to indicate it's ready
+        let ready = timeout(Duration::from_secs(2), async {
+            while reader.read_line(&mut line).await? > 0 {
+                if line.contains("ROSH_PORT=") || line.contains("Listening") {
+                    return Ok::<_, anyhow::Error>(true);
+                }
+                line.clear();
+            }
+            Ok(false)
+        })
+        .await??;
+
         assert!(
-            server.try_wait()?.is_none(),
+            ready || server.try_wait()?.is_none(),
             "Server should accept --max-sessions argument"
         );
 
@@ -178,12 +204,25 @@ mod tests {
                 .kill_on_drop(true)
                 .spawn()?;
 
-            // Give it a moment to start
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Check server started by reading its output
+            let stdout = server.stdout.take().unwrap();
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
 
-            // Should start successfully
+            // Wait for server to indicate it's ready
+            let ready = timeout(Duration::from_secs(2), async {
+                while reader.read_line(&mut line).await? > 0 {
+                    if line.contains("ROSH_PORT=") || line.contains("Listening") {
+                        return Ok::<_, anyhow::Error>(true);
+                    }
+                    line.clear();
+                }
+                Ok(false)
+            })
+            .await??;
+
             assert!(
-                server.try_wait()?.is_none(),
+                ready || server.try_wait()?.is_none(),
                 "Server should accept log level {level}"
             );
 
