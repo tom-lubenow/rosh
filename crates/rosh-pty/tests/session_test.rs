@@ -3,7 +3,7 @@
 use rosh_pty::{SessionBuilder, SessionEvent};
 use std::process::Command;
 use std::time::Duration;
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 #[cfg(test)]
 mod tests {
@@ -152,8 +152,8 @@ mod tests {
             let _ = session.start().await;
         });
 
-        // Give the process time to start
-        sleep(Duration::from_millis(100)).await;
+        // Wait for process to be ready instead of using sleep
+        // The cat command starts immediately, so we can proceed
 
         // Get session reference from the handle
         let (session2, _) = SessionBuilder::new()

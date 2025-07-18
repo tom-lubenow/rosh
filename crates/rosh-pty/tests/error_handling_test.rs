@@ -4,7 +4,6 @@
 mod unix_tests {
     use rosh_pty::{Pty, SessionBuilder};
     use std::process::Command;
-    use std::time::Duration;
 
     #[test]
     fn test_pty_invalid_size() {
@@ -52,10 +51,8 @@ mod unix_tests {
 
         // Shell might still start but exit immediately
         if let Ok(process) = result {
-            // Check if process exits quickly
-            std::thread::sleep(Duration::from_millis(100));
-
-            // Clean up
+            // Can't check if process is still running without blocking
+            // Just try to kill it - if it already exited, kill will fail harmlessly
             let _ = process.kill();
         }
     }
@@ -123,7 +120,7 @@ mod unix_tests {
             match result {
                 Ok(process) => {
                     // Process might start but exit immediately
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Can't check without blocking, so just clean up
                     let _ = process.kill();
                 }
                 Err(_) => {

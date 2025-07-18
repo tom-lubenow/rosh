@@ -101,22 +101,25 @@ mod tests {
     #[tokio::test]
     async fn test_message_stats_rtt() {
         use crate::protocol::MessageStats;
-        use std::time::Duration;
 
         let mut stats = MessageStats::default();
 
-        // Test RTT tracking
+        // Test RTT tracking with a known timestamp difference
+        // Instead of sleeping, we'll simulate a specific RTT by manipulating the timestamp
         let sent_timestamp = Message::timestamp_now();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        stats.update_rtt(sent_timestamp);
+
+        // Simulate 15ms RTT by creating a timestamp 15ms in the past
+        let simulated_rtt_micros = 15000u64;
+        let adjusted_timestamp = sent_timestamp.saturating_sub(simulated_rtt_micros);
+        stats.update_rtt(adjusted_timestamp);
 
         assert!(stats.last_rtt_micros.is_some());
         let rtt_micros = stats.last_rtt_micros.unwrap();
 
-        // RTT should be at least 10ms (10000 microseconds)
-        assert!(rtt_micros >= 10000);
-        // But less than 100ms (100000 microseconds) for a reasonable test
-        assert!(rtt_micros < 100000);
+        // RTT should be approximately what we simulated
+        // Allow some tolerance for timestamp precision
+        assert!(rtt_micros >= simulated_rtt_micros.saturating_sub(1000));
+        assert!(rtt_micros <= simulated_rtt_micros.saturating_add(1000));
     }
 
     #[tokio::test]
