@@ -1,4 +1,8 @@
 //! Common test utilities for rosh integration tests
+//!
+//! This module provides two types of test utilities:
+//! 1. In-process test servers/clients for fast, reliable testing
+//! 2. Subprocess-based testing for end-to-end validation
 
 #![allow(dead_code)]
 
@@ -11,25 +15,23 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-/// Test server instance that cleans up on drop
-pub struct TestServer {
+// Note: To use in-process test helpers, import them directly from test_helpers module
+
+/// Test server instance that spawns a real subprocess
+/// Use this only when you need to test the actual binary behavior
+pub struct SubprocessTestServer {
     process: Option<tokio::process::Child>,
     pub port: u16,
     pub key: String,
 }
 
-impl TestServer {
-    /// Start a new test server
+impl SubprocessTestServer {
+    /// Start a new test server subprocess
+    /// Only use this when you need to test the actual binary
     pub async fn start() -> Result<Self> {
-        eprintln!("Starting test server...");
-
-        // Build server binary
-        Command::new("cargo")
-            .args(["build", "--bin", "rosh-server"])
-            .status()
-            .await?;
-
-        eprintln!("Server binary built, spawning server...");
+        eprintln!(
+            "Starting subprocess test server (slower, use in-process server when possible)..."
+        );
 
         let mut server = Command::new(env!("CARGO_BIN_EXE_rosh-server"))
             .args(["--bind", "127.0.0.1:0", "--one-shot"])
@@ -38,7 +40,7 @@ impl TestServer {
             .kill_on_drop(true)
             .spawn()?;
 
-        eprintln!("Server spawned, reading output...");
+        eprintln!("Server subprocess spawned, reading output...");
 
         let stdout = server.stdout.take().unwrap();
         let mut reader = BufReader::new(stdout);
@@ -72,21 +74,15 @@ impl TestServer {
 
         eprintln!("Got server port: {port} and key: {key}");
 
-        Ok(TestServer {
+        Ok(SubprocessTestServer {
             process: Some(server),
             port,
             key,
         })
     }
 
-    /// Start a server with specific options
+    /// Start a server subprocess with specific options
     pub async fn start_with_options(args: &[&str]) -> Result<Self> {
-        // Build server binary
-        Command::new("cargo")
-            .args(["build", "--bin", "rosh-server"])
-            .status()
-            .await?;
-
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rosh-server"));
         cmd.args(args);
         cmd.stdout(Stdio::piped());
@@ -124,7 +120,7 @@ impl TestServer {
         let port = port.ok_or_else(|| anyhow::anyhow!("Server didn't provide port"))?;
         let key = key.ok_or_else(|| anyhow::anyhow!("Server didn't provide key"))?;
 
-        Ok(TestServer {
+        Ok(SubprocessTestServer {
             process: Some(server),
             port,
             key,
@@ -132,7 +128,7 @@ impl TestServer {
     }
 }
 
-impl Drop for TestServer {
+impl Drop for SubprocessTestServer {
     fn drop(&mut self) {
         if let Some(mut process) = self.process.take() {
             // Try to kill the process
@@ -141,17 +137,17 @@ impl Drop for TestServer {
     }
 }
 
-/// Test client builder
-pub struct TestClient {
+/// Test client builder for subprocess testing
+pub struct SubprocessTestClient {
     server_addr: String,
     key: Option<String>,
     args: Vec<String>,
 }
 
-impl TestClient {
-    /// Create a new test client
+impl SubprocessTestClient {
+    /// Create a new subprocess test client
     pub fn new(host: &str, port: u16) -> Self {
-        TestClient {
+        SubprocessTestClient {
             server_addr: format!("{host}:{port}"),
             key: None,
             args: Vec::new(),
@@ -170,15 +166,12 @@ impl TestClient {
         self
     }
 
-    /// Run the client and return the output
+    /// Run the client subprocess and return the output
     pub async fn run(self) -> Result<std::process::Output> {
-        eprintln!("Running client to connect to {}", self.server_addr);
-
-        // Build client binary
-        Command::new("cargo")
-            .args(["build", "--bin", "rosh"])
-            .status()
-            .await?;
+        eprintln!(
+            "Running subprocess client to connect to {}",
+            self.server_addr
+        );
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rosh"));
 
@@ -197,15 +190,12 @@ impl TestClient {
         Ok(cmd.output().await?)
     }
 
-    /// Spawn the client process
+    /// Spawn the client subprocess
     pub async fn spawn(self) -> Result<tokio::process::Child> {
-        eprintln!("Spawning client to connect to {}", self.server_addr);
-
-        // Build client binary
-        Command::new("cargo")
-            .args(["build", "--bin", "rosh"])
-            .status()
-            .await?;
+        eprintln!(
+            "Spawning subprocess client to connect to {}",
+            self.server_addr
+        );
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_rosh"));
 
@@ -332,7 +322,7 @@ pub async fn wait_for_output(
     .await?
 }
 
-/// Mock connection for testing
+/// Mock connection for testing network message passing
 pub struct MockConnection {
     sent_messages: Mutex<Vec<NetworkMessage>>,
     received_messages: Mutex<Vec<NetworkMessage>>,
@@ -396,3 +386,14 @@ impl Connection for MockConnection {
         })
     }
 }
+
+// Backward compatibility aliases (deprecated)
+#[deprecated(
+    note = "Use SubprocessTestServer for subprocess testing or start_in_process_server for fast testing"
+)]
+pub type TestServer = SubprocessTestServer;
+
+#[deprecated(
+    note = "Use SubprocessTestClient for subprocess testing or InProcessClient for fast testing"
+)]
+pub type TestClient = SubprocessTestClient;
