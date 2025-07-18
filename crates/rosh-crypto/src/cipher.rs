@@ -6,7 +6,7 @@
 use crate::CryptoError;
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes128Gcm, Key, Nonce,
+    Aes128Gcm, Aes256Gcm, Key, Nonce,
 };
 use chacha20poly1305::ChaCha20Poly1305;
 
@@ -133,6 +133,74 @@ impl Cipher for Aes128GcmCipher {
     }
 }
 
+/// AES-256-GCM cipher implementation
+pub struct Aes256GcmCipher {
+    cipher: Aes256Gcm,
+}
+
+impl Aes256GcmCipher {
+    /// Create a new AES-256-GCM cipher
+    pub fn new(key: &[u8]) -> Result<Self, CryptoError> {
+        if key.len() != 32 {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: 32,
+                got: key.len(),
+            });
+        }
+
+        let key = Key::<Aes256Gcm>::from_slice(key);
+        let cipher = Aes256Gcm::new(key);
+
+        Ok(Self { cipher })
+    }
+}
+
+impl Cipher for Aes256GcmCipher {
+    fn encrypt(&self, nonce: &[u8], plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if nonce.len() != AES_GCM_NONCE_SIZE {
+            return Err(CryptoError::InvalidNonceLength {
+                expected: AES_GCM_NONCE_SIZE,
+                got: nonce.len(),
+            });
+        }
+
+        let nonce = Nonce::from_slice(nonce);
+        self.cipher
+            .encrypt(
+                nonce,
+                aes_gcm::aead::Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| CryptoError::EncryptionFailed)
+    }
+
+    fn decrypt(&self, nonce: &[u8], ciphertext: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if nonce.len() != AES_GCM_NONCE_SIZE {
+            return Err(CryptoError::InvalidNonceLength {
+                expected: AES_GCM_NONCE_SIZE,
+                got: nonce.len(),
+            });
+        }
+
+        let nonce = Nonce::from_slice(nonce);
+        self.cipher
+            .decrypt(
+                nonce,
+                aes_gcm::aead::Payload {
+                    msg: ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| CryptoError::DecryptionFailed)
+    }
+
+    fn algorithm(&self) -> CipherAlgorithm {
+        CipherAlgorithm::Aes256Gcm
+    }
+}
+
 /// ChaCha20-Poly1305 cipher implementation
 pub struct ChaCha20Poly1305Cipher {
     cipher: ChaCha20Poly1305,
@@ -208,10 +276,7 @@ pub fn create_cipher(
 ) -> Result<Box<dyn Cipher>, CryptoError> {
     match algorithm {
         CipherAlgorithm::Aes128Gcm => Ok(Box::new(Aes128GcmCipher::new(key)?)),
-        CipherAlgorithm::Aes256Gcm => {
-            // TODO: Implement Aes256Gcm
-            Err(CryptoError::EncryptionFailed)
-        }
+        CipherAlgorithm::Aes256Gcm => Ok(Box::new(Aes256GcmCipher::new(key)?)),
         CipherAlgorithm::ChaCha20Poly1305 => Ok(Box::new(ChaCha20Poly1305Cipher::new(key)?)),
     }
 }
@@ -280,6 +345,21 @@ mod tests {
 
         let nonce = b"unique nonce";
         let plaintext = b"Hello, world!";
+        let aad = b"additional data";
+
+        let ciphertext = cipher.encrypt(nonce, plaintext, aad).unwrap();
+        let decrypted = cipher.decrypt(nonce, &ciphertext, aad).unwrap();
+
+        assert_eq!(plaintext, &decrypted[..]);
+    }
+
+    #[test]
+    fn test_aes256_gcm_roundtrip() {
+        let key = b"01234567890123456789012345678901"; // 32 bytes
+        let cipher = Aes256GcmCipher::new(key).unwrap();
+
+        let nonce = b"unique nonce";
+        let plaintext = b"Hello, AES-256!";
         let aad = b"additional data";
 
         let ciphertext = cipher.encrypt(nonce, plaintext, aad).unwrap();
