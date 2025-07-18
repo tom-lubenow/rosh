@@ -214,9 +214,28 @@ fn test_empty_plaintext() {
 }
 
 #[test]
-fn test_aes256_gcm_not_implemented() {
-    // AES-256-GCM is not yet implemented
-    let key = vec![0u8; 32];
-    let result = create_cipher(CipherAlgorithm::Aes256Gcm, &key);
-    assert!(result.is_err());
+fn test_aes256_gcm_invalid_key_length() {
+    // AES-256 requires 32 bytes
+    let short_key = vec![0u8; 16];
+    let result = create_cipher(CipherAlgorithm::Aes256Gcm, &short_key);
+    assert!(matches!(result, Err(CryptoError::InvalidKeyLength { .. })));
+
+    let long_key = vec![0u8; 64];
+    let result = create_cipher(CipherAlgorithm::Aes256Gcm, &long_key);
+    assert!(matches!(result, Err(CryptoError::InvalidKeyLength { .. })));
+}
+
+#[test]
+fn test_aes256_gcm_encryption() {
+    let key = vec![0u8; 32]; // Correct size for AES-256
+    let cipher = create_cipher(CipherAlgorithm::Aes256Gcm, &key).unwrap();
+    let nonce = vec![0u8; AES_GCM_NONCE_SIZE];
+
+    // Test basic encryption/decryption
+    let plaintext = b"Hello, AES-256-GCM!";
+    let aad = b"metadata";
+    let encrypted = cipher.encrypt(&nonce, plaintext, aad).unwrap();
+    let decrypted = cipher.decrypt(&nonce, &encrypted, aad).unwrap();
+
+    assert_eq!(decrypted, plaintext);
 }
