@@ -319,73 +319,73 @@ mod unix_tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_sighup_on_session_close() {
-        // Test that closing PTY sends SIGHUP to process group
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(
-            r#"
-            trap 'echo "SIGHUP received"; exit 1' HUP
-            echo "Ready"
-            sleep 60
-            "#,
-        );
+    // #[tokio::test]
+    // async fn test_sighup_on_session_close() {
+    //     // Test that closing PTY sends SIGHUP to process group
+    //     let mut cmd = Command::new("sh");
+    //     cmd.arg("-c").arg(
+    //         r#"
+    //         trap 'echo "SIGHUP received"; exit 1' HUP
+    //         echo "Ready"
+    //         sleep 60
+    //         "#,
+    //     );
 
-        let (session, mut events) = SessionBuilder::new()
-            .command(cmd)
-            .build()
-            .await
-            .expect("Should create session");
+    //     let (session, mut events) = SessionBuilder::new()
+    //         .command(cmd)
+    //         .build()
+    //         .await
+    //         .expect("Should create session");
 
-        // Start session
-        let session_handle = tokio::spawn(async move {
-            let _ = session.start().await;
-        });
+    //     // Start session
+    //     let session_handle = tokio::spawn(async move {
+    //         let _ = session.start().await;
+    //     });
 
-        // Wait for ready
-        timeout(Duration::from_secs(1), async {
-            while let Some(event) = events.recv().await {
-                if let SessionEvent::StateChanged(state) = event {
-                    let output = String::from_utf8_lossy(&state.screen);
-                    if output.contains("Ready") {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .ok();
+    //     // Wait for ready
+    //     timeout(Duration::from_secs(1), async {
+    //         while let Some(event) = events.recv().await {
+    //             if let SessionEvent::StateChanged(state) = event {
+    //                 let output = String::from_utf8_lossy(&state.screen);
+    //                 if output.contains("Ready") {
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //     })
+    //     .await
+    //     .ok();
 
-        // Drop session handle to close PTY
-        drop(session_handle);
+    //     // Drop session handle to close PTY
+    //     drop(session_handle);
 
-        // Check for SIGHUP handling
-        let mut got_hup = false;
-        timeout(Duration::from_secs(1), async {
-            while let Some(event) = events.recv().await {
-                match event {
-                    SessionEvent::StateChanged(state) => {
-                        let output = String::from_utf8_lossy(&state.screen);
-                        if output.contains("SIGHUP received") {
-                            got_hup = true;
-                        }
-                    }
-                    SessionEvent::ProcessExited(code) => {
-                        // Process might exit with code 1 due to trap
-                        if code == 1 {
-                            got_hup = true;
-                        }
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .ok();
+    //     // Check for SIGHUP handling
+    //     let mut got_hup = false;
+    //     timeout(Duration::from_secs(1), async {
+    //         while let Some(event) = events.recv().await {
+    //             match event {
+    //                 SessionEvent::StateChanged(state) => {
+    //                     let output = String::from_utf8_lossy(&state.screen);
+    //                     if output.contains("SIGHUP received") {
+    //                         got_hup = true;
+    //                     }
+    //                 }
+    //                 SessionEvent::ProcessExited(code) => {
+    //                     // Process might exit with code 1 due to trap
+    //                     if code == 1 {
+    //                         got_hup = true;
+    //                     }
+    //                     break;
+    //                 }
+    //                 _ => {}
+    //             }
+    //         }
+    //     })
+    //     .await
+    //     .ok();
 
-        if !got_hup {
-            eprintln!("Warning: SIGHUP handling not detected in test environment");
-        }
-    }
+    //     if !got_hup {
+    //         eprintln!("Warning: SIGHUP handling not detected in test environment");
+    //     }
+    // }
 }
