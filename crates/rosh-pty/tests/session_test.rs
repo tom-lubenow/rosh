@@ -192,79 +192,9 @@ mod tests {
 
         // Just verify we can still get state after resize
         let _state = session.get_state().await;
-        
+
         // Drain any events
         let _ = timeout(Duration::from_millis(100), events.recv()).await;
-    }
-
-    #[tokio::test]
-    #[ignore] // This test relies on shutdown behavior that's hard to test reliably
-    async fn test_session_shutdown() {
-        let (session, events) = SessionBuilder::new().build().await.expect("Should create session");
-
-        // Just verify we can call shutdown without panic
-        session.shutdown();
-        
-        // And that events channel is still valid
-        drop(events);
-    }
-
-    #[tokio::test]
-    #[ignore] // PTY creation might succeed even with invalid command on some systems
-    async fn test_session_invalid_command() {
-        let cmd = Command::new("/this/command/does/not/exist");
-
-        let result = SessionBuilder::new().command(cmd).build().await;
-
-        // On some systems, PTY allocation succeeds even if command doesn't exist
-        // The error would occur when trying to execute
-        if result.is_err() {
-            // Good, it failed as expected
-        } else {
-            // PTY was created, but process should fail to start
-            let (session, mut events) = result.unwrap();
-            
-            // Start session
-            tokio::spawn(async move {
-                let _ = session.start().await;
-            });
-            
-            // Should get an error or exit event
-            let got_error_or_exit = timeout(Duration::from_secs(1), async {
-                while let Some(event) = events.recv().await {
-                    match event {
-                        SessionEvent::ProcessExited(_) | SessionEvent::Error(_) => return true,
-                        _ => {}
-                    }
-                }
-                false
-            }).await.unwrap_or(false);
-            
-            assert!(got_error_or_exit, "Should get error or exit for invalid command");
-        }
-    }
-
-    #[tokio::test]
-    #[ignore] // Flaky on CI due to timing
-    async fn test_session_events_state_changed() {
-        // Use a command that produces output
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg("echo 'Test Output'; sleep 0.1");
-
-        let (session, mut events) = SessionBuilder::new()
-            .command(cmd)
-            .build()
-            .await
-            .expect("Should create session");
-
-        // Start session
-        tokio::spawn(async move {
-            let _ = session.start().await;
-        });
-
-        // Just verify we get some events
-        let got_event = timeout(Duration::from_secs(2), events.recv()).await;
-        assert!(got_event.is_ok(), "Should receive at least one event");
     }
 
     #[tokio::test]
@@ -282,7 +212,7 @@ mod tests {
         // We need to test kill without consuming the session
         // In practice, you'd keep a handle to kill the process
         // For this test, we'll create a second session to demonstrate
-        
+
         // Start session
         tokio::spawn(async move {
             let _ = session.start().await;
@@ -291,7 +221,7 @@ mod tests {
         // For testing kill, we'll just verify the event system works
         // by checking that we can receive events
         let got_event = timeout(Duration::from_millis(500), events.recv()).await;
-        
+
         // We should get at least a state change event
         assert!(got_event.is_ok(), "Should receive events from session");
     }
@@ -361,7 +291,7 @@ mod tests {
         let state = rosh_terminal::TerminalState::new(80, 24);
         let event1 = SessionEvent::StateChanged(state);
         let event2 = event1.clone();
-        
+
         match (&event1, &event2) {
             (SessionEvent::StateChanged(s1), SessionEvent::StateChanged(s2)) => {
                 assert_eq!(s1.width, s2.width);

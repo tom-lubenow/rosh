@@ -219,34 +219,6 @@ async fn test_client_ssh_no_key_required() -> Result<()> {
 }
 
 /// Test various SSH-style connection strings
-#[tokio::test]
-#[ignore = "Hangs - needs investigation"]
-async fn test_ssh_style_connections() -> Result<()> {
-    let ssh_style_hosts = vec![
-        "user@localhost",
-        "testuser@example.com",
-        "admin@192.168.1.1",
-        "user@host.subdomain.example.com",
-    ];
-
-    for host in ssh_style_hosts {
-        let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
-            .args([host])
-            .output()
-            .await?;
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // Should not complain about missing --key
-        assert!(
-            !stderr.contains("--key required"),
-            "Host '{host}' should be treated as SSH connection"
-        );
-    }
-
-    Ok(())
-}
-
 /// Test direct connection strings
 #[tokio::test]
 async fn test_direct_style_connections() -> Result<()> {

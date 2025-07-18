@@ -48,21 +48,6 @@ async fn test_server_startup() {
 }
 
 /// Test basic client-server connection flow
-#[tokio::test]
-#[ignore] // Ignore by default as it requires SSH setup
-async fn test_client_server_connection() {
-    // This test would require setting up SSH keys and running a full server
-    // For now, we'll just document what it should do:
-
-    // 1. Start rosh-server on a known port
-    // 2. Get the connection string from server output
-    // 3. Start rosh client with the connection string
-    // 4. Verify client connects successfully
-    // 5. Send some test input
-    // 6. Verify output is received
-    // 7. Clean shutdown of both client and server
-}
-
 /// Test that client handles missing required arguments
 #[tokio::test]
 async fn test_client_invalid_connection() {
