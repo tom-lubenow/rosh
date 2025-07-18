@@ -123,7 +123,8 @@ impl Predictor {
                         new_state.cursor_y += 1;
                         if new_state.cursor_y >= new_state.height {
                             new_state.cursor_y = new_state.height - 1;
-                            // TODO: Implement scrolling
+                            // Implement scrolling
+                            self.scroll_screen(&mut new_state);
                         }
                     }
                 }
@@ -179,7 +180,8 @@ impl Predictor {
                     new_state.cursor_y += 1;
                     if new_state.cursor_y >= new_state.height {
                         new_state.cursor_y = new_state.height - 1;
-                        // TODO: Implement scrolling
+                        // Implement scrolling
+                        self.scroll_screen(&mut new_state);
                     }
                 }
 
@@ -246,6 +248,27 @@ impl Predictor {
     /// Check if we have unconfirmed predictions
     pub fn has_predictions(&self) -> bool {
         !self.predictions.is_empty()
+    }
+
+    /// Scroll the screen up by one line
+    fn scroll_screen(&self, state: &mut TerminalState) {
+        let width = state.width as usize;
+
+        // Save the first line to scrollback
+        let first_line = state.screen[..width].to_vec();
+        state.scrollback.push(first_line);
+
+        // Shift all lines up by one
+        state.screen.rotate_left(width);
+
+        // Clear the last line
+        let last_line_start = (state.height as usize - 1) * width;
+        for i in last_line_start..state.screen.len() {
+            state.screen[i] = b' ';
+            if i < state.attributes.len() {
+                state.attributes[i] = 0;
+            }
+        }
     }
 
     /// Get number of pending predictions
@@ -316,5 +339,83 @@ mod tests {
         let predicted = predictor.predicted_state();
         assert_eq!(predicted.screen[2], b'C');
         assert_eq!(predicted.cursor_x, 3);
+    }
+
+    #[test]
+    fn test_scrolling_prediction() {
+        // Create a small 3x2 terminal for easy testing
+        let initial_state = TerminalState::new(3, 2);
+        let mut predictor = Predictor::new(initial_state);
+
+        // Fill the first line
+        predictor.predict_input(UserInput::Character('A'));
+        predictor.predict_input(UserInput::Character('B'));
+        predictor.predict_input(UserInput::Character('C'));
+
+        // Fill the second line
+        predictor.predict_input(UserInput::Character('D'));
+        predictor.predict_input(UserInput::Character('E'));
+        predictor.predict_input(UserInput::Character('F'));
+
+        // This should trigger scrolling
+        predictor.predict_input(UserInput::Character('G'));
+
+        let predicted = predictor.predicted_state();
+
+        // First line should now be DEF
+        assert_eq!(&predicted.screen[0..3], b"DEF");
+        // Second line should start with G
+        assert_eq!(predicted.screen[3], b'G');
+
+        // Check that scrollback was updated
+        assert_eq!(predicted.scrollback.len(), 1);
+        assert_eq!(predicted.scrollback[0], b"ABC");
+    }
+
+    #[test]
+    fn test_enter_key_scrolling() {
+        let initial_state = TerminalState::new(4, 2); // Use wider terminal to avoid wrap
+        let mut predictor = Predictor::new(initial_state);
+
+        // Fill first line
+        predictor.predict_input(UserInput::Character('X'));
+        predictor.predict_input(UserInput::Character('Y'));
+        predictor.predict_input(UserInput::Character('Z'));
+
+        // Check that first line is filled
+        let state = predictor.predicted_state();
+        assert_eq!(&state.screen[0..3], b"XYZ");
+
+        // Press enter (should move to second line)
+        predictor.predict_input(UserInput::Key(KeyCode::Enter));
+        assert_eq!(predictor.predicted_state().cursor_y, 1);
+        assert_eq!(predictor.predicted_state().cursor_x, 0);
+
+        // Fill second line
+        predictor.predict_input(UserInput::Character('A'));
+        predictor.predict_input(UserInput::Character('B'));
+        predictor.predict_input(UserInput::Character('C'));
+
+        // Check current state before scrolling
+        let state = predictor.predicted_state();
+        assert_eq!(&state.screen[0..3], b"XYZ");
+        assert_eq!(&state.screen[4..7], b"ABC"); // Second line starts at index 4 (width=4)
+
+        // Press enter again (should trigger scroll)
+        predictor.predict_input(UserInput::Key(KeyCode::Enter));
+
+        let predicted = predictor.predicted_state();
+        assert_eq!(predicted.cursor_y, 1); // Still at bottom
+        assert_eq!(predicted.cursor_x, 0);
+
+        // After scrolling:
+        // - First line should now have what was on second line (ABC)
+        // - Second line should be empty (new line created by enter)
+        assert_eq!(&predicted.screen[0..3], b"ABC");
+        assert_eq!(&predicted.screen[4..8], b"    "); // All spaces
+
+        // Scrollback should have the original first line (padded to width 4)
+        assert_eq!(predicted.scrollback.len(), 1);
+        assert_eq!(&predicted.scrollback[0][0..3], b"XYZ");
     }
 }

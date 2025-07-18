@@ -27,6 +27,13 @@ pub fn framebuffer_to_state(fb: &FrameBuffer, title: &str) -> TerminalState {
         }
     }
 
+    // Convert scrollback buffer
+    let scrollback = fb
+        .scrollback()
+        .iter()
+        .map(|row| row.iter().map(|cell| cell.c as u8).collect::<Vec<u8>>())
+        .collect();
+
     TerminalState {
         width,
         height,
@@ -35,7 +42,7 @@ pub fn framebuffer_to_state(fb: &FrameBuffer, title: &str) -> TerminalState {
         cursor_y,
         cursor_visible: fb.cursor_visible(),
         title: title.to_string(),
-        scrollback: Vec::new(), // TODO: Convert scrollback
+        scrollback,
         attributes,
     }
 }
@@ -69,6 +76,9 @@ pub fn state_to_framebuffer(state: &TerminalState, fb: &mut FrameBuffer) {
     // Update cursor
     fb.set_cursor_position(state.cursor_x, state.cursor_y);
     fb.set_cursor_visible(state.cursor_visible);
+
+    // Note: We don't restore scrollback here as it would interfere
+    // with the framebuffer's own scrollback management
 }
 
 /// Convert a TerminalState back to cells for a FrameBuffer
@@ -337,5 +347,63 @@ mod tests {
         assert!(rendered.contains("\x1b["));
         assert!(rendered.contains("RED"));
         assert!(rendered.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_framebuffer_to_state_with_scrollback() {
+        let mut fb = FrameBuffer::new(3, 2);
+
+        // Fill both lines exactly as in framebuffer test
+        fb.write_char('A');
+        fb.write_char('B');
+        fb.write_char('C');
+        fb.write_char('D');
+        fb.write_char('E');
+        fb.write_char('F');
+
+        // Next write should cause scroll
+        fb.write_char('G');
+
+        let state = framebuffer_to_state(&fb, "Test");
+
+        // Check that scrollback was converted
+        assert_eq!(state.scrollback.len(), 1);
+        assert_eq!(state.scrollback[0], vec![b'A', b'B', b'C']);
+
+        // Check current screen content (after scrolling)
+        // First line should be DEF, second line should have G and spaces
+        assert_eq!(&state.screen[0..3], b"DEF");
+        assert_eq!(state.screen[3], b'G');
+        assert_eq!(state.screen[4], b' ');
+        assert_eq!(state.screen[5], b' ');
+    }
+
+    #[test]
+    fn test_state_to_framebuffer_preserves_data() {
+        let mut state = TerminalState::new(3, 2);
+        state.screen[0] = b'X';
+        state.screen[1] = b'Y';
+        state.screen[2] = b'Z';
+        state.screen[3] = b'1';
+        state.screen[4] = b'2';
+        state.screen[5] = b'3';
+        state.cursor_x = 2;
+        state.cursor_y = 1;
+        state.cursor_visible = false;
+
+        // Add scrollback (note: we don't restore this, it's managed separately)
+        state.scrollback.push(vec![b'O', b'l', b'd']);
+
+        let mut fb = FrameBuffer::new(3, 2);
+        state_to_framebuffer(&state, &mut fb);
+
+        assert_eq!(fb.cell_at(0, 0).unwrap().c, 'X');
+        assert_eq!(fb.cell_at(1, 0).unwrap().c, 'Y');
+        assert_eq!(fb.cell_at(2, 0).unwrap().c, 'Z');
+        assert_eq!(fb.cell_at(0, 1).unwrap().c, '1');
+        assert_eq!(fb.cell_at(1, 1).unwrap().c, '2');
+        assert_eq!(fb.cell_at(2, 1).unwrap().c, '3');
+        assert_eq!(fb.cursor_position(), (2, 1));
+        assert!(!fb.cursor_visible());
     }
 }
