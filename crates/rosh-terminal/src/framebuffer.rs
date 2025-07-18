@@ -236,6 +236,41 @@ impl FrameBuffer {
         }
     }
 
+    /// Clear from beginning of screen to cursor (inclusive)
+    pub fn clear_to_cursor(&mut self) {
+        let cursor_pos =
+            (self.cursor_y as usize) * (self.width as usize) + (self.cursor_x as usize);
+        for i in 0..=cursor_pos {
+            if i < self.cells.len() {
+                self.cells[i] = Cell::default();
+            }
+        }
+    }
+
+    /// Clear from beginning of line to cursor (inclusive)
+    pub fn clear_line_to_cursor(&mut self) {
+        let row_start = (self.cursor_y as usize) * (self.width as usize);
+        let cursor_pos = row_start + (self.cursor_x as usize);
+
+        for i in row_start..=cursor_pos {
+            if i < self.cells.len() {
+                self.cells[i] = Cell::default();
+            }
+        }
+    }
+
+    /// Clear entire line
+    pub fn clear_line(&mut self) {
+        let row_start = (self.cursor_y as usize) * (self.width as usize);
+        let row_end = row_start + (self.width as usize);
+
+        for i in row_start..row_end {
+            if i < self.cells.len() {
+                self.cells[i] = Cell::default();
+            }
+        }
+    }
+
     /// Scroll screen up by n lines
     pub fn scroll_up(&mut self, n: u16) {
         if n == 0 || n > self.height {
@@ -459,5 +494,294 @@ mod tests {
         assert_eq!(fb.cell_at(0, 0).unwrap().c, 'A');
         assert_eq!(fb.cell_at(1, 0).unwrap().c, 'B');
         assert_eq!(fb.cell_at(0, 1).unwrap().c, 'C');
+    }
+
+    #[test]
+    fn test_clear_to_cursor() {
+        let mut fb = FrameBuffer::new(4, 3);
+
+        // Fill cells directly without triggering scrolling
+        fb.cells[0] = Cell {
+            c: 'A',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[1] = Cell {
+            c: 'B',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[2] = Cell {
+            c: 'C',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[3] = Cell {
+            c: 'D',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        fb.cells[4] = Cell {
+            c: 'E',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[5] = Cell {
+            c: 'F',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[6] = Cell {
+            c: 'G',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[7] = Cell {
+            c: 'H',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        fb.cells[8] = Cell {
+            c: 'I',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[9] = Cell {
+            c: 'J',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[10] = Cell {
+            c: 'K',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[11] = Cell {
+            c: 'L',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        // Position cursor at (2, 1)
+        fb.set_cursor_position(2, 1);
+
+        // Clear to cursor
+        fb.clear_to_cursor();
+
+        // Everything up to and including cursor position should be cleared
+        // First row should be all spaces
+        for x in 0..4 {
+            assert_eq!(fb.cell_at(x, 0).unwrap().c, ' ');
+        }
+
+        // Second row up to cursor should be spaces
+        assert_eq!(fb.cell_at(0, 1).unwrap().c, ' ');
+        assert_eq!(fb.cell_at(1, 1).unwrap().c, ' ');
+        assert_eq!(fb.cell_at(2, 1).unwrap().c, ' ');
+
+        // Rest should be unchanged
+        assert_eq!(fb.cell_at(3, 1).unwrap().c, 'H');
+        assert_eq!(fb.cell_at(0, 2).unwrap().c, 'I');
+    }
+
+    #[test]
+    fn test_clear_line_to_cursor() {
+        let mut fb = FrameBuffer::new(5, 2);
+
+        // Fill cells directly to avoid wrapping
+        fb.cells[0] = Cell {
+            c: 'A',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[1] = Cell {
+            c: 'B',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[2] = Cell {
+            c: 'C',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[3] = Cell {
+            c: 'D',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[4] = Cell {
+            c: 'E',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        fb.cells[5] = Cell {
+            c: 'F',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[6] = Cell {
+            c: 'G',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[7] = Cell {
+            c: 'H',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[8] = Cell {
+            c: 'I',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[9] = Cell {
+            c: 'J',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        // Position cursor at (3, 1)
+        fb.set_cursor_position(3, 1);
+
+        // Clear line to cursor
+        fb.clear_line_to_cursor();
+
+        // First line should be unchanged
+        assert_eq!(fb.cell_at(0, 0).unwrap().c, 'A');
+        assert_eq!(fb.cell_at(4, 0).unwrap().c, 'E');
+
+        // Second line up to cursor should be cleared
+        assert_eq!(fb.cell_at(0, 1).unwrap().c, ' ');
+        assert_eq!(fb.cell_at(1, 1).unwrap().c, ' ');
+        assert_eq!(fb.cell_at(2, 1).unwrap().c, ' ');
+        assert_eq!(fb.cell_at(3, 1).unwrap().c, ' ');
+
+        // Rest of second line unchanged
+        assert_eq!(fb.cell_at(4, 1).unwrap().c, 'J');
+    }
+
+    #[test]
+    fn test_clear_line() {
+        let mut fb = FrameBuffer::new(4, 3);
+
+        // Fill cells directly
+        fb.cells[0] = Cell {
+            c: 'A',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[1] = Cell {
+            c: 'B',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[2] = Cell {
+            c: 'C',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[3] = Cell {
+            c: 'D',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        fb.cells[4] = Cell {
+            c: 'E',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[5] = Cell {
+            c: 'F',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[6] = Cell {
+            c: 'G',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[7] = Cell {
+            c: 'H',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        fb.cells[8] = Cell {
+            c: 'I',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[9] = Cell {
+            c: 'J',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[10] = Cell {
+            c: 'K',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+        fb.cells[11] = Cell {
+            c: 'L',
+            fg: Color::Default,
+            bg: Color::Default,
+            attrs: Attributes::default(),
+        };
+
+        // Position cursor on second line
+        fb.set_cursor_position(2, 1);
+
+        // Clear entire line
+        fb.clear_line();
+
+        // First line unchanged
+        assert_eq!(fb.cell_at(0, 0).unwrap().c, 'A');
+        assert_eq!(fb.cell_at(3, 0).unwrap().c, 'D');
+
+        // Second line cleared
+        for x in 0..4 {
+            assert_eq!(fb.cell_at(x, 1).unwrap().c, ' ');
+        }
+
+        // Third line unchanged
+        assert_eq!(fb.cell_at(0, 2).unwrap().c, 'I');
+        assert_eq!(fb.cell_at(3, 2).unwrap().c, 'L');
     }
 }

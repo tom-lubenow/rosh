@@ -151,7 +151,7 @@ impl Perform for FrameBuffer {
                 let mode = params.iter().next().map(|p| p[0]).unwrap_or(0);
                 match mode {
                     0 => self.clear_to_end(),
-                    1 => {} // Clear to cursor (not implemented)
+                    1 => self.clear_to_cursor(),
                     2 => self.clear(),
                     _ => {}
                 }
@@ -162,8 +162,8 @@ impl Perform for FrameBuffer {
                 let mode = params.iter().next().map(|p| p[0]).unwrap_or(0);
                 match mode {
                     0 => self.clear_to_eol(),
-                    1 => {} // Clear to cursor (not implemented)
-                    2 => {} // Clear entire line (not implemented)
+                    1 => self.clear_line_to_cursor(),
+                    2 => self.clear_line(),
                     _ => {}
                 }
             }
@@ -407,5 +407,162 @@ mod tests {
 
         assert_eq!(fb.cell_at(0, 0).unwrap().c, 'C');
         assert_eq!(fb.cell_at(1, 0).unwrap().c, 'B');
+    }
+
+    #[test]
+    fn test_clear_to_cursor_escape() {
+        let mut parser = Parser::new();
+        let mut fb = FrameBuffer::new(6, 3);
+
+        // Fill with pattern carefully to avoid scrolling
+        // First row: ABCDE
+        for ch in b"ABCDE" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move to position (0, 1) using cursor positioning
+        for byte in b"\x1b[2;1H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Second row: FGHIJ
+        for ch in b"FGHIJ" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move to position (0, 2)
+        for byte in b"\x1b[3;1H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Third row: KLMNO
+        for ch in b"KLMNO" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move cursor to (2, 1)
+        for byte in b"\x1b[2;3H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Clear to cursor (CSI 1J)
+        for byte in b"\x1b[1J" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Everything up to cursor should be cleared
+        for y in 0..2 {
+            for x in 0..6 {
+                if y == 0 || (y == 1 && x <= 2) {
+                    assert_eq!(
+                        fb.cell_at(x, y).unwrap().c,
+                        ' ',
+                        "({x}, {y}) should be cleared"
+                    );
+                }
+            }
+        }
+
+        // Rest should be unchanged
+        assert_eq!(fb.cell_at(3, 1).unwrap().c, 'I');
+        assert_eq!(fb.cell_at(4, 1).unwrap().c, 'J');
+        assert_eq!(fb.cell_at(0, 2).unwrap().c, 'K');
+    }
+
+    #[test]
+    fn test_clear_line_to_cursor_escape() {
+        let mut parser = Parser::new();
+        let mut fb = FrameBuffer::new(6, 2);
+
+        // Fill first line
+        for ch in b"ABCDE" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move to second line
+        for byte in b"\x1b[2;1H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Fill second line
+        for ch in b"FGHIJ" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move cursor to (3, 1)
+        for byte in b"\x1b[2;4H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Clear line to cursor (CSI 1K)
+        for byte in b"\x1b[1K" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // First line unchanged
+        assert_eq!(fb.cell_at(0, 0).unwrap().c, 'A');
+        assert_eq!(fb.cell_at(4, 0).unwrap().c, 'E');
+
+        // Second line up to cursor cleared
+        for x in 0..=3 {
+            assert_eq!(fb.cell_at(x, 1).unwrap().c, ' ');
+        }
+
+        // Rest of second line unchanged
+        assert_eq!(fb.cell_at(4, 1).unwrap().c, 'J');
+    }
+
+    #[test]
+    fn test_clear_entire_line_escape() {
+        let mut parser = Parser::new();
+        let mut fb = FrameBuffer::new(5, 3);
+
+        // Fill first row
+        for ch in b"ABCD" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move to second row
+        for byte in b"\x1b[2;1H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Fill second row
+        for ch in b"EFGH" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move to third row
+        for byte in b"\x1b[3;1H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Fill third row
+        for ch in b"IJKL" {
+            parser.advance(&mut fb, *ch);
+        }
+
+        // Move cursor to second line
+        for byte in b"\x1b[2;3H" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // Clear entire line (CSI 2K)
+        for byte in b"\x1b[2K" {
+            parser.advance(&mut fb, *byte);
+        }
+
+        // First line unchanged
+        assert_eq!(fb.cell_at(0, 0).unwrap().c, 'A');
+        assert_eq!(fb.cell_at(3, 0).unwrap().c, 'D');
+
+        // Second line cleared
+        for x in 0..5 {
+            assert_eq!(fb.cell_at(x, 1).unwrap().c, ' ');
+        }
+
+        // Third line unchanged
+        assert_eq!(fb.cell_at(0, 2).unwrap().c, 'I');
+        assert_eq!(fb.cell_at(3, 2).unwrap().c, 'L');
     }
 }
