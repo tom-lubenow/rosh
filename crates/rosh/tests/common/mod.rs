@@ -1,7 +1,9 @@
 //! Common test utilities for rosh integration tests
 
 use anyhow::Result;
+use rosh_network::{Connection, Message as NetworkMessage, NetworkError};
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -326,4 +328,69 @@ pub async fn wait_for_output(
         Err(anyhow::anyhow!("Pattern '{}' not found in output", pattern))
     })
     .await?
+}
+
+/// Mock connection for testing
+pub struct MockConnection {
+    sent_messages: Mutex<Vec<NetworkMessage>>,
+    received_messages: Mutex<Vec<NetworkMessage>>,
+    error: Mutex<Option<String>>,
+}
+
+impl MockConnection {
+    pub fn new() -> Self {
+        Self {
+            sent_messages: Mutex::new(Vec::new()),
+            received_messages: Mutex::new(Vec::new()),
+            error: Mutex::new(None),
+        }
+    }
+
+    /// Queue a message to be received
+    pub fn expect_receive(&mut self, message: NetworkMessage) {
+        self.received_messages.lock().unwrap().push(message);
+    }
+
+    /// Set an error to be returned
+    pub fn set_error(&mut self, error: &str) {
+        *self.error.lock().unwrap() = Some(error.to_string());
+    }
+
+    /// Get sent messages
+    pub fn sent_messages(&self) -> Vec<NetworkMessage> {
+        self.sent_messages.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Connection for MockConnection {
+    async fn send(&mut self, message: NetworkMessage) -> Result<(), NetworkError> {
+        if let Some(error) = self.error.lock().unwrap().as_ref() {
+            return Err(NetworkError::TransportError(error.to_string()));
+        }
+        self.sent_messages.lock().unwrap().push(message);
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Result<NetworkMessage, NetworkError> {
+        if let Some(error) = self.error.lock().unwrap().as_ref() {
+            return Err(NetworkError::TransportError(error.to_string()));
+        }
+        let mut messages = self.received_messages.lock().unwrap();
+        if messages.is_empty() {
+            Err(NetworkError::TransportError(
+                "No messages queued".to_string(),
+            ))
+        } else {
+            Ok(messages.remove(0))
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Connection> {
+        Box::new(MockConnection {
+            sent_messages: Mutex::new(self.sent_messages.lock().unwrap().clone()),
+            received_messages: Mutex::new(self.received_messages.lock().unwrap().clone()),
+            error: Mutex::new(self.error.lock().unwrap().clone()),
+        })
+    }
 }

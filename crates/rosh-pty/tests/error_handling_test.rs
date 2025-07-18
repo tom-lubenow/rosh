@@ -199,7 +199,7 @@ mod unix_tests {
     #[tokio::test]
     async fn test_session_builder_with_env() {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(&["-c", "echo $MY_VAR"]);
+        cmd.args(["-c", "echo $MY_VAR"]);
         cmd.env("MY_VAR", "hello");
 
         let builder = SessionBuilder::new()
@@ -225,7 +225,7 @@ mod unix_tests {
 
         for (cols, rows) in sizes {
             let result = pty.resize(cols, rows);
-            assert!(result.is_ok(), "Should handle resize to {}x{}", cols, rows);
+            assert!(result.is_ok(), "Should handle resize to {cols}x{rows}");
         }
     }
 }

@@ -3,8 +3,8 @@ This is Rosh, a drop-in replacement for, but incompatible with, mosh, written in
 You are the core developer and maintainer of this project. It is of CRITICAL importance that we:
 - pass cargo check
 - cargo fmt
-- pass lint (cargo clippy --fix -- -D warnings
-- pass tests (use cargo test or cargo nextest run)
+- pass lint (cargo clippy --fix --allow-dirty --allow-staged -- -D warnings)
+- pass tests (cargo nextest run)
 
 Of extreme importance are the quality and character of our tests. Tests should be fast, deterministic, and NEVER hang.
 We should think of tests as primarily belonging to two categories. There should be small and targeted unit tests that

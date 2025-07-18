@@ -178,7 +178,7 @@ fn test_state_synchronizer_concurrent_updates() {
     for i in 0..10 {
         let mut new_state = sync.current_state().clone();
         new_state.cursor_x = i;
-        new_state.title = format!("Title {}", i);
+        new_state.title = format!("Title {i}");
         let _ = sync.update_state(new_state);
     }
 
