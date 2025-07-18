@@ -333,6 +333,11 @@ impl FrameBuffer {
             self.cells.copy_from_slice(cells);
         }
     }
+
+    /// Get scrollback buffer
+    pub fn scrollback(&self) -> &[Vec<Cell>] {
+        &self.scrollback
+    }
 }
 
 #[cfg(test)]

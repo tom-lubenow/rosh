@@ -125,7 +125,9 @@ impl StateDiff {
             }];
         }
 
-        // TODO: Implement scrollback diff (for now, just track new lines)
+        // Generate scrollback changes
+        diff.scrollback_changes =
+            Self::generate_scrollback_changes(&old.scrollback, &new.scrollback);
 
         Ok(diff)
     }
@@ -178,6 +180,23 @@ impl StateDiff {
         changes
     }
 
+    /// Generate scrollback changes
+    fn generate_scrollback_changes(old: &[Vec<u8>], new: &[Vec<u8>]) -> Vec<ScrollbackChange> {
+        let mut changes = Vec::new();
+
+        // If the new scrollback is longer, those are new lines
+        if new.len() > old.len() {
+            for (i, line) in new.iter().enumerate().skip(old.len()) {
+                changes.push(ScrollbackChange {
+                    index: i as u32,
+                    line: line.clone(),
+                });
+            }
+        }
+
+        changes
+    }
+
     /// Apply diff to a state to produce a new state
     pub fn apply(&self, state: &TerminalState) -> Result<TerminalState, StateError> {
         let mut new_state = state.clone();
@@ -222,8 +241,15 @@ impl StateDiff {
         }
 
         // Apply scrollback changes
-        for _change in &self.scrollback_changes {
-            // TODO: Implement scrollback updates
+        for change in &self.scrollback_changes {
+            let index = change.index as usize;
+            // If this is a new line at the end, append it
+            if index == new_state.scrollback.len() {
+                new_state.scrollback.push(change.line.clone());
+            } else if index < new_state.scrollback.len() {
+                // Update existing line (shouldn't happen in normal operation)
+                new_state.scrollback[index] = change.line.clone();
+            }
         }
 
         Ok(new_state)
@@ -295,5 +321,62 @@ mod tests {
 
         assert_eq!(&applied_state.screen[0..4], b"Test");
         assert_eq!(applied_state.cursor_x, 4);
+    }
+
+    #[test]
+    fn test_scrollback_diff() {
+        let old_state = TerminalState::new(80, 24);
+        let mut new_state = old_state.clone();
+
+        // Add some lines to scrollback
+        new_state
+            .scrollback
+            .push(vec![b'L', b'i', b'n', b'e', b' ', b'1']);
+        new_state
+            .scrollback
+            .push(vec![b'L', b'i', b'n', b'e', b' ', b'2']);
+        new_state
+            .scrollback
+            .push(vec![b'L', b'i', b'n', b'e', b' ', b'3']);
+
+        let diff = StateDiff::generate(&old_state, &new_state).unwrap();
+
+        // Should have 3 scrollback changes
+        assert_eq!(diff.scrollback_changes.len(), 3);
+        assert_eq!(diff.scrollback_changes[0].index, 0);
+        assert_eq!(diff.scrollback_changes[0].line, b"Line 1");
+        assert_eq!(diff.scrollback_changes[1].index, 1);
+        assert_eq!(diff.scrollback_changes[1].line, b"Line 2");
+        assert_eq!(diff.scrollback_changes[2].index, 2);
+        assert_eq!(diff.scrollback_changes[2].line, b"Line 3");
+
+        // Apply the diff
+        let applied_state = diff.apply(&old_state).unwrap();
+        assert_eq!(applied_state.scrollback.len(), 3);
+        assert_eq!(applied_state.scrollback[0], b"Line 1");
+        assert_eq!(applied_state.scrollback[1], b"Line 2");
+        assert_eq!(applied_state.scrollback[2], b"Line 3");
+    }
+
+    #[test]
+    fn test_scrollback_diff_incremental() {
+        let mut state1 = TerminalState::new(80, 24);
+        state1.scrollback.push(vec![b'O', b'l', b'd']);
+
+        let mut state2 = state1.clone();
+        state2.scrollback.push(vec![b'N', b'e', b'w']);
+
+        let diff = StateDiff::generate(&state1, &state2).unwrap();
+
+        // Should only have the new line
+        assert_eq!(diff.scrollback_changes.len(), 1);
+        assert_eq!(diff.scrollback_changes[0].index, 1);
+        assert_eq!(diff.scrollback_changes[0].line, b"New");
+
+        // Apply and verify
+        let applied = diff.apply(&state1).unwrap();
+        assert_eq!(applied.scrollback.len(), 2);
+        assert_eq!(applied.scrollback[0], b"Old");
+        assert_eq!(applied.scrollback[1], b"New");
     }
 }
