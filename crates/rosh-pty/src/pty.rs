@@ -12,18 +12,53 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// RAII wrapper for file descriptors
+#[derive(Debug)]
+struct OwnedFd(RawFd);
+
+impl OwnedFd {
+    /// Create a new OwnedFd from a raw file descriptor
+    fn new(fd: RawFd) -> Self {
+        Self(fd)
+    }
+
+    /// Extract the inner file descriptor, consuming self without closing it
+    fn into_raw(self) -> RawFd {
+        let fd = self.0;
+        std::mem::forget(self);
+        fd
+    }
+}
+
+impl AsRawFd for OwnedFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
+
+impl Drop for OwnedFd {
+    fn drop(&mut self) {
+        // Only close if fd is valid
+        if self.0 >= 0 {
+            unsafe {
+                libc::close(self.0);
+            }
+        }
+    }
+}
+
 /// A pseudo-terminal pair
 pub struct Pty {
     /// Master file descriptor
     master: PtyMaster,
 
     /// Slave file descriptor  
-    slave: RawFd,
+    slave: Option<OwnedFd>,
 }
 
 /// Master side of a PTY
 pub struct PtyMaster {
-    fd: RawFd,
+    fd: Option<OwnedFd>,
 }
 
 impl Pty {
@@ -47,8 +82,10 @@ impl Pty {
             .map_err(|e| PtyError::AllocationFailed(format!("Failed to set non-blocking: {e}")))?;
 
         Ok(Self {
-            master: PtyMaster { fd: master_fd },
-            slave: slave_fd,
+            master: PtyMaster {
+                fd: Some(OwnedFd::new(master_fd)),
+            },
+            slave: Some(OwnedFd::new(slave_fd)),
         })
     }
 
@@ -61,11 +98,17 @@ impl Pty {
             ws_ypixel: 0,
         };
 
-        unsafe {
-            let ret = libc::ioctl(self.master.fd, libc::TIOCSWINSZ, &winsize as *const _);
-            if ret < 0 {
-                return Err(PtyError::IoError(io::Error::last_os_error()));
+        if let Some(ref fd) = self.master.fd {
+            unsafe {
+                let ret = libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &winsize as *const _);
+                if ret < 0 {
+                    return Err(PtyError::IoError(io::Error::last_os_error()));
+                }
             }
+        } else {
+            return Err(PtyError::IoError(io::Error::other(
+                "Master FD is not available",
+            )));
         }
 
         Ok(())
@@ -78,40 +121,43 @@ impl Pty {
 
     /// Take ownership of the master side
     pub fn take_master(mut self) -> PtyMaster {
-        // Close slave FD
-        unsafe {
-            libc::close(self.slave);
-        }
-        // Mark slave as invalid so Drop doesn't close it again
-        self.slave = -1;
+        // Drop slave FD (closes it automatically)
+        self.slave = None;
 
         // Take ownership of master
-        let master = PtyMaster { fd: self.master.fd };
-        // Mark master FD as invalid
-        self.master.fd = -1;
-
-        master
+        PtyMaster {
+            fd: self.master.fd.take(),
+        }
     }
 
     /// Spawn a process in the PTY
     pub fn spawn(mut self, mut command: Command) -> Result<PtyProcess, PtyError> {
-        let slave_fd = self.slave;
-        let master_fd = self.master.fd;
+        // Take ownership of slave FD
+        let slave_owned = self
+            .slave
+            .take()
+            .ok_or_else(|| PtyError::IoError(io::Error::other("Slave FD already taken")))?;
 
-        // Mark FDs as invalid so Drop doesn't close them
-        self.slave = -1;
-        self.master.fd = -1;
+        // Get raw slave FD for child process (unused in parent)
+        let _slave_fd = slave_owned.as_raw_fd();
 
-        let master = PtyMaster { fd: master_fd };
+        // Take ownership of master FD
+        let master_fd = self
+            .master
+            .fd
+            .take()
+            .ok_or_else(|| PtyError::IoError(io::Error::other("Master FD already taken")))?;
+
+        let master = PtyMaster {
+            fd: Some(master_fd),
+        };
 
         // Fork a new process
         match unsafe { fork() }.map_err(|e| PtyError::SpawnFailed(format!("Fork failed: {e}")))? {
             ForkResult::Parent { child } => {
                 // In parent process
-                // Close slave FD as we don't need it
-                unsafe {
-                    libc::close(slave_fd);
-                }
+                // slave_owned will be dropped here, closing the FD automatically
+                drop(slave_owned);
 
                 Ok(PtyProcess {
                     master,
@@ -121,19 +167,20 @@ impl Pty {
             ForkResult::Child => {
                 // In child process
                 // Close master FD
-                unsafe {
-                    libc::close(master.fd);
-                }
+                drop(master);
+
+                // Extract slave FD without closing (needed for dup2)
+                let slave_raw = slave_owned.into_raw();
 
                 // Create new session
                 setsid().expect("setsid failed");
 
                 // Set up slave as stdin/stdout/stderr
                 unsafe {
-                    libc::dup2(slave_fd, 0);
-                    libc::dup2(slave_fd, 1);
-                    libc::dup2(slave_fd, 2);
-                    libc::close(slave_fd);
+                    libc::dup2(slave_raw, 0);
+                    libc::dup2(slave_raw, 1);
+                    libc::dup2(slave_raw, 2);
+                    libc::close(slave_raw);
                 }
 
                 // Set controlling terminal
@@ -152,16 +199,7 @@ impl Pty {
     }
 }
 
-impl Drop for Pty {
-    fn drop(&mut self) {
-        if self.slave != -1 {
-            unsafe {
-                libc::close(self.slave);
-            }
-        }
-        // Master will be dropped by its own Drop impl
-    }
-}
+// Drop implementation is no longer needed - OwnedFd handles cleanup automatically
 
 /// A process running in a PTY
 pub struct PtyProcess {
@@ -219,37 +257,43 @@ impl PtyProcess {
     }
 }
 
-impl AsRawFd for PtyMaster {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd
+impl PtyMaster {
+    /// Check if this PtyMaster still owns a file descriptor
+    pub fn has_fd(&self) -> bool {
+        self.fd.is_some()
     }
 }
 
-impl Drop for PtyMaster {
-    fn drop(&mut self) {
-        if self.fd != -1 {
-            unsafe {
-                libc::close(self.fd);
-            }
-        }
+impl AsRawFd for PtyMaster {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1)
     }
 }
+
+// Drop implementation is no longer needed - OwnedFd handles cleanup automatically
 
 /// Async wrapper for PTY master
 pub struct AsyncPtyMaster {
-    inner: tokio::fs::File,
+    inner: tokio::io::unix::AsyncFd<std::fs::File>,
 }
 
 impl AsyncPtyMaster {
     /// Create from a PtyMaster
-    pub fn new(master: PtyMaster) -> io::Result<Self> {
-        let fd = master.as_raw_fd();
-        // Prevent Drop from closing the FD
-        std::mem::forget(master);
+    pub fn new(mut master: PtyMaster) -> io::Result<Self> {
+        // Take ownership of the file descriptor
+        let owned_fd = master
+            .fd
+            .take()
+            .ok_or_else(|| io::Error::other("Master FD already taken"))?;
 
-        // Create tokio File from raw FD
+        // Extract raw fd without closing
+        let fd = owned_fd.into_raw();
+
+        // Create std::fs::File from raw FD (already non-blocking)
         let file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let inner = tokio::fs::File::from_std(file);
+
+        // Use AsyncFd for proper async handling of non-blocking FD
+        let inner = tokio::io::unix::AsyncFd::new(file)?;
 
         Ok(Self { inner })
     }
@@ -257,35 +301,86 @@ impl AsyncPtyMaster {
 
 impl AsyncRead for AsyncPtyMaster {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+        loop {
+            let mut guard = match self.inner.poll_read_ready(cx) {
+                std::task::Poll::Ready(Ok(guard)) => guard,
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            };
+
+            match guard.try_io(|inner| {
+                use std::io::Read;
+                let unfilled = buf.initialize_unfilled();
+                match inner.get_ref().read(unfilled) {
+                    Ok(n) => {
+                        buf.advance(n);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }) {
+                Ok(Ok(())) => return std::task::Poll::Ready(Ok(())),
+                Ok(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                Err(_would_block) => continue,
+            }
+        }
     }
 }
 
 impl AsyncWrite for AsyncPtyMaster {
     fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
-        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+        loop {
+            let mut guard = match self.inner.poll_write_ready(cx) {
+                std::task::Poll::Ready(Ok(guard)) => guard,
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            };
+
+            match guard.try_io(|inner| {
+                use std::io::Write;
+                inner.get_ref().write(buf)
+            }) {
+                Ok(result) => return std::task::Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
     }
 
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+        loop {
+            let mut guard = match self.inner.poll_write_ready(cx) {
+                std::task::Poll::Ready(Ok(guard)) => guard,
+                std::task::Poll::Ready(Err(e)) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            };
+
+            match guard.try_io(|inner| {
+                use std::io::Write;
+                inner.get_ref().flush()
+            }) {
+                Ok(result) => return std::task::Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
     }
 
     fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
-        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+        // PTYs don't need shutdown
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -298,7 +393,7 @@ mod tests {
     fn test_pty_allocation() {
         let pty = Pty::new().unwrap();
         assert!(pty.master.as_raw_fd() > 0);
-        assert!(pty.slave > 0);
+        assert!(pty.slave.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1) > 0);
     }
 
     #[test]
