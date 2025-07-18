@@ -12,6 +12,9 @@ use tokio::sync::RwLock;
 mod common;
 use common::MockConnection;
 
+// Export public items for testing
+pub use rosh::client::{key_to_bytes, parse_server_arg, TerminalUI};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +436,3 @@ mod tests {
         Ok(())
     }
 }
-
-// Export public items for testing
-pub use rosh::client::{key_to_bytes, parse_server_arg, TerminalUI};
