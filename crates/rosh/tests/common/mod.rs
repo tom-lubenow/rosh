@@ -1,5 +1,7 @@
 //! Common test utilities for rosh integration tests
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use rosh_network::{Connection, Message as NetworkMessage, NetworkError};
 use std::process::Stdio;

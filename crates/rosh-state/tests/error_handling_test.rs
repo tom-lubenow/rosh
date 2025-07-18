@@ -126,8 +126,8 @@ fn test_state_message_serialization_errors() {
     let mut corrupted = serialized.to_vec();
     if corrupted.len() > 10 {
         // Corrupt in the middle
-        for i in 5..10 {
-            corrupted[i] = 0xFF;
+        for byte in corrupted.iter_mut().take(10).skip(5) {
+            *byte = 0xFF;
         }
     }
 
