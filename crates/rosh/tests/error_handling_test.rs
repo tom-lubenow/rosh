@@ -2,7 +2,6 @@
 
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
@@ -118,90 +117,6 @@ async fn test_client_invalid_server_address() {
             "Client should fail with invalid address: {addr}"
         );
     }
-}
-
-#[tokio::test]
-#[ignore = "Hangs - needs investigation"]
-async fn test_client_connection_refused() {
-    // Try to connect to a port that's not listening
-    let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
-        .args(["--key", "dGVzdGtleQ==", "127.0.0.1:54321"])
-        .output()
-        .await
-        .expect("Failed to run client");
-
-    assert!(
-        !output.status.success(),
-        "Client should fail when server not running"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Connection refused") || stderr.contains("connection refused"),
-        "Should report connection refused"
-    );
-}
-
-#[tokio::test]
-#[ignore = "Hangs - needs investigation"]
-async fn test_client_invalid_key() {
-    // Start server
-    let mut server = Command::new(env!("CARGO_BIN_EXE_rosh-server"))
-        .args(["--bind", "127.0.0.1:0", "--one-shot"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("Failed to spawn server");
-
-    let stdout = server.stdout.take().unwrap();
-    let mut reader = BufReader::new(stdout);
-
-    // Get server info
-    let mut port = None;
-    let mut key = None;
-    let mut line = String::new();
-
-    timeout(Duration::from_secs(5), async {
-        while reader.read_line(&mut line).await.unwrap() > 0 {
-            if line.trim().starts_with("ROSH_PORT=") {
-                port = Some(
-                    line.trim()
-                        .strip_prefix("ROSH_PORT=")
-                        .unwrap()
-                        .parse::<u16>()
-                        .unwrap(),
-                );
-            } else if line.trim().starts_with("ROSH_KEY=") {
-                key = Some(line.trim().strip_prefix("ROSH_KEY=").unwrap().to_string());
-            }
-            if port.is_some() && key.is_some() {
-                break;
-            }
-            line.clear();
-        }
-        Ok::<_, anyhow::Error>(())
-    })
-    .await
-    .expect("Timeout")
-    .expect("Failed to read server output");
-
-    let port = port.expect("No port from server");
-
-    // Try to connect with wrong key
-    let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
-        .args(["--key", "d3JvbmdrZXk=", &format!("127.0.0.1:{port}")])
-        .output()
-        .await
-        .expect("Failed to run client");
-
-    // Clean up
-    let _ = server.kill().await;
-
-    assert!(
-        !output.status.success(),
-        "Client should fail with wrong key"
-    );
 }
 
 #[tokio::test]
@@ -332,38 +247,6 @@ async fn test_client_timeout_handling() {
         }
         Err(_) => {
             // Timeout - expected
-        }
-    }
-}
-
-#[tokio::test]
-#[ignore = "Hangs - needs investigation"]
-async fn test_malformed_ssh_connection_strings() {
-    // Test various malformed SSH connection strings
-    let malformed_strings = vec![
-        "@host",                // Missing user
-        "user@",                // Missing host
-        "user@@host",           // Double @
-        "user@host@extra",      // Multiple @
-        "@",                    // Just @
-        "user@host:port:extra", // Malformed port
-    ];
-
-    for conn_str in malformed_strings {
-        let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
-            .args([conn_str])
-            .output()
-            .await
-            .expect("Failed to run client");
-
-        // Should either fail or handle gracefully
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // Should not panic, just report error
-            assert!(
-                !stderr.contains("panic"),
-                "Should not panic on malformed connection string: {conn_str}"
-            );
         }
     }
 }

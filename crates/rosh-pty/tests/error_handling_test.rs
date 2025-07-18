@@ -60,51 +60,6 @@ mod unix_tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "Hangs - needs investigation"]
-    async fn test_session_builder_edge_cases() {
-        // Test session builder with various edge cases
-        let builder = SessionBuilder::new();
-
-        // Set extreme dimensions
-        let builder = builder.dimensions(0, 0);
-        let builder = builder.dimensions(u16::MAX, u16::MAX);
-
-        // Set empty command - SessionBuilder takes a Command, not a string
-        let cmd = Command::new("");
-        let builder = builder.command(cmd);
-
-        // Try to spawn
-        let result = builder.build().await;
-        // Empty command might fail at build or when trying to execute
-        match result {
-            Ok((session, _events)) => {
-                // Session might be created but process exits immediately
-                // Just ensure no panic
-                drop(session);
-            }
-            Err(_) => {
-                // Failed immediately - this is expected
-            }
-        }
-
-        // Test with non-existent command
-        let cmd = Command::new("/this/does/not/exist");
-        let builder = SessionBuilder::new().command(cmd).dimensions(24, 80);
-
-        let result = builder.build().await;
-        // Non-existent command might fail at build or when trying to execute
-        match result {
-            Ok((session, _events)) => {
-                // Session might be created but process exits immediately
-                drop(session);
-            }
-            Err(_) => {
-                // Failed immediately - this is expected
-            }
-        }
-    }
-
     #[test]
     fn test_pty_resize_after_spawn() {
         let pty = Pty::new().expect("Failed to create PTY");

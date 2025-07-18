@@ -172,13 +172,7 @@ mod tests {
 
         for level in &levels {
             let mut server = Command::new(env!("CARGO_BIN_EXE_rosh-server"))
-                .args([
-                    "--bind",
-                    "127.0.0.1:0",
-                    "--one-shot",
-                    "--log-level",
-                    level,
-                ])
+                .args(["--bind", "127.0.0.1:0", "--one-shot", "--log-level", level])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
@@ -204,7 +198,7 @@ mod tests {
 #[cfg(test)]
 mod unit_tests {
     use rosh_crypto::CipherAlgorithm;
-    
+
     #[test]
     fn test_cipher_algorithm_values() {
         // Verify cipher algorithm enum values match what server expects
