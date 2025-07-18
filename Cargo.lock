@@ -2000,7 +2000,8 @@ name = "rosh"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "async-trait",
+ "base64",
  "clap",
  "crossterm 0.27.0",
  "dirs",

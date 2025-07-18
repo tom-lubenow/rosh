@@ -78,15 +78,15 @@ struct Args {
 }
 
 /// Terminal UI state
-struct TerminalUI {
-    terminal: Terminal,
-    state_sync: Arc<RwLock<StateSynchronizer>>,
-    prediction_enabled: bool,
+pub struct TerminalUI {
+    pub terminal: Terminal,
+    pub state_sync: Arc<RwLock<StateSynchronizer>>,
+    pub prediction_enabled: bool,
     stdout: io::Stdout,
 }
 
 impl TerminalUI {
-    fn new(
+    pub fn new(
         cols: u16,
         rows: u16,
         state_sync: Arc<RwLock<StateSynchronizer>>,
@@ -244,7 +244,7 @@ struct ConnectionInfo {
 }
 
 /// Parse server argument to determine connection type
-fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
+pub fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
     if server.contains('@') {
         // SSH format: user@host
         let parts: Vec<&str> = server.split('@').collect();
@@ -714,7 +714,7 @@ async fn run_client_loop(
 }
 
 /// Convert key event to bytes
-fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
+pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
     match key.code {
         KeyCode::Char(c) => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {

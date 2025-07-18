@@ -28,8 +28,7 @@ async fn test_server_invalid_bind_address() {
 
         assert!(
             !output.status.success(),
-            "Server should fail with invalid address: {}",
-            addr
+            "Server should fail with invalid address: {addr}"
         );
     }
 }
@@ -93,8 +92,7 @@ async fn test_server_duplicate_bind() {
             || stderr.contains("Address in use")
             || stderr.contains("bind")
             || !output.status.success(),
-        "Second server should fail to bind: {}",
-        stderr
+        "Second server should fail to bind: {stderr}"
     );
 }
 
@@ -117,8 +115,7 @@ async fn test_client_invalid_server_address() {
 
         assert!(
             !output.status.success(),
-            "Client should fail with invalid address: {}",
-            addr
+            "Client should fail with invalid address: {addr}"
         );
     }
 }
@@ -193,7 +190,7 @@ async fn test_client_invalid_key() {
 
     // Try to connect with wrong key
     let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
-        .args(["--key", "d3JvbmdrZXk=", &format!("127.0.0.1:{}", port)])
+        .args(["--key", "d3JvbmdrZXk=", &format!("127.0.0.1:{port}")])
         .output()
         .await
         .expect("Failed to run client");
@@ -365,8 +362,7 @@ async fn test_malformed_ssh_connection_strings() {
             // Should not panic, just report error
             assert!(
                 !stderr.contains("panic"),
-                "Should not panic on malformed connection string: {}",
-                conn_str
+                "Should not panic on malformed connection string: {conn_str}"
             );
         }
     }
