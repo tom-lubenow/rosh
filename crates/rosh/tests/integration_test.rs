@@ -2,29 +2,17 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+// Test using common helpers
+mod common;
+mod test_helpers;
+
 /// Test that the server binary can start and bind to a port
+/// This test validates the actual binary behavior, so we use subprocess
 #[tokio::test]
-async fn test_server_startup() {
-    // Build the server binary first
-    let build_output = Command::new("cargo")
-        .args(["build", "--bin", "rosh-server"])
-        .output()
-        .await
-        .expect("Failed to build server");
-
-    assert!(build_output.status.success(), "Server build failed");
-
-    // Start the server in one-shot mode on a random port
-    let mut server = Command::new("cargo")
-        .args([
-            "run",
-            "--bin",
-            "rosh-server",
-            "--",
-            "--one-shot",
-            "--bind",
-            "127.0.0.1:0",
-        ])
+async fn test_server_binary_startup() {
+    // For testing the actual binary, we still need to use subprocess
+    let mut server = Command::new(env!("CARGO_BIN_EXE_rosh-server"))
+        .args(["--one-shot", "--bind", "127.0.0.1:0"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
@@ -80,22 +68,52 @@ async fn test_server_startup() {
     }
 }
 
-/// Test basic client-server connection flow
+/// Test basic client-server connection using in-process helpers
+#[tokio::test]
+async fn test_basic_connection() {
+    use test_helpers::{
+        start_test_server as start_in_process_server, TestClient as InProcessClient,
+        TestServerConfig,
+    };
+
+    // Start in-process server (faster than subprocess)
+    let config = TestServerConfig::default();
+    let server = start_in_process_server(config)
+        .await
+        .expect("Failed to start test server");
+
+    // Create client and connect
+    let client = InProcessClient::new("127.0.0.1", server.info.port).with_key(&server.info.key);
+
+    let mut connection = client.connect().await.expect("Failed to connect to server");
+
+    // Test basic echo
+    let test_data = b"Hello, Rosh!";
+    connection
+        .send(test_data)
+        .await
+        .expect("Failed to send data");
+
+    let mut buf = vec![0u8; 1024];
+    let n = connection
+        .receive(&mut buf)
+        .await
+        .expect("Failed to receive data");
+
+    assert_eq!(&buf[..n], test_data);
+
+    // Clean up
+    connection.close().await.ok();
+    server.shutdown().await.ok();
+}
+
 /// Test that client handles missing required arguments
+/// This test needs the actual binary, so we use subprocess
 #[tokio::test]
 async fn test_client_invalid_connection() {
-    // First build the client
-    let build_output = Command::new("cargo")
-        .args(["build", "--bin", "rosh"])
-        .output()
-        .await
-        .expect("Failed to build client");
-
-    assert!(build_output.status.success(), "Client build failed");
-
     // Test with direct connection (requires --key)
-    let output = Command::new("cargo")
-        .args(["run", "--bin", "rosh", "--", "localhost:2022"])
+    let output = Command::new(env!("CARGO_BIN_EXE_rosh"))
+        .args(["localhost:2022"])
         .output()
         .await
         .expect("Failed to run client");
