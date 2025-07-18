@@ -4,8 +4,7 @@ use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::sync::Arc;
 
 /// Certificate validation mode for Rosh
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum CertValidationMode {
     /// Skip all certificate validation (DANGEROUS - development only)
     #[default]
@@ -17,7 +16,6 @@ pub enum CertValidationMode {
     /// Validate using a pinned certificate fingerprint
     PinnedCertificate(Vec<u8>),
 }
-
 
 /// Create a certificate verifier based on the validation mode
 pub fn create_cert_verifier(
