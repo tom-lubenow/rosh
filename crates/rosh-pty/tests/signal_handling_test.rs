@@ -364,15 +364,4 @@ mod unix_tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_sighup_on_session_close() {
-        // This test demonstrates that sessions need explicit shutdown
-        // The kernel doesn't automatically send SIGHUP when dropping a handle
-
-        // For now, we'll skip this test as it requires architectural changes
-        // to properly implement session shutdown and SIGHUP delivery
-        eprintln!(
-            "Note: Automatic SIGHUP on session close requires explicit shutdown implementation"
-        );
-    }
 }
