@@ -73,17 +73,7 @@ mod tests {
     #[test]
     fn test_cert_validation_mode_default() {
         let mode = CertValidationMode::default();
-
-        #[cfg(debug_assertions)]
-        {
-            // In debug mode, should skip validation
-            assert!(matches!(mode, CertValidationMode::SkipValidation));
-        }
-
-        #[cfg(not(debug_assertions))]
-        {
-            // In release mode, should use system roots
-            assert!(matches!(mode, CertValidationMode::SystemRoots));
-        }
+        // Always skip validation since we bootstrap over SSH and have our own crypto
+        assert!(matches!(mode, CertValidationMode::SkipValidation));
     }
 }

@@ -262,8 +262,7 @@ async fn test_client_reconnects_after_disconnect() -> Result<()> {
 
     assert!(
         successful_connections >= 2,
-        "Expected at least 2 successful connections, got {}",
-        successful_connections
+        "Expected at least 2 successful connections, got {successful_connections}"
     );
 
     Ok(())

@@ -81,21 +81,10 @@ mod unix_tests {
         let process = pty.spawn(cmd).expect("Failed to spawn process");
 
         // Wait for process to exit
-        let status = process.wait().expect("Failed to wait for process");
+        let exit_code = process.wait().expect("Failed to wait for process");
 
-        // Check exit code - wait returns exit status as i32
-        #[cfg(target_os = "linux")]
-        {
-            // On Linux, exit status needs to be extracted
-            let code = (status >> 8) & 0xff;
-            assert_eq!(code, 42, "Should get correct exit code");
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            // On other systems, might be different
-            // Just check that process exited
-            let _ = status;
-        }
+        // Check exit code - wait() returns the exit code directly
+        assert_eq!(exit_code, 42, "Should get correct exit code");
     }
 
     #[test]

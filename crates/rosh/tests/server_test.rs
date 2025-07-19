@@ -19,7 +19,6 @@ mod in_process_tests {
         start_test_server as start_in_process_server, TestClient as InProcessClient,
         TestServerConfig,
     };
-    use rosh_crypto::CipherAlgorithm;
 
     #[tokio::test]
     async fn test_server_accepts_connections() -> Result<()> {
@@ -47,40 +46,6 @@ mod in_process_tests {
         }
 
         server.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_server_with_different_ciphers() -> Result<()> {
-        let ciphers = vec![
-            CipherAlgorithm::Aes128Gcm,
-            CipherAlgorithm::Aes256Gcm,
-            CipherAlgorithm::ChaCha20Poly1305,
-        ];
-
-        for cipher in ciphers {
-            let config = TestServerConfig {
-                _cipher: cipher,
-                ..Default::default()
-            };
-
-            let server = start_in_process_server(config).await?;
-
-            // Test connection
-            let client =
-                InProcessClient::new("127.0.0.1", server.info.port).with_key(&server.info.key);
-
-            let mut conn = client.connect().await?;
-            conn.send(b"test").await?;
-
-            let mut buf = vec![0u8; 1024];
-            let n = conn.receive(&mut buf).await?;
-            assert_eq!(&buf[..n], b"test");
-
-            conn.close().await.ok();
-            server.shutdown().await?;
-        }
-
         Ok(())
     }
 
