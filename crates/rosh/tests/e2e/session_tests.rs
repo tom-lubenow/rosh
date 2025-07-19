@@ -22,11 +22,11 @@ async fn test_session_cleanup_on_client_disconnect() -> Result<()> {
     let client_connected = match client.try_wait() {
         Ok(None) => true, // Still running
         Ok(Some(status)) => {
-            eprintln!("Client exited with status: {}", status);
+            eprintln!("Client exited with status: {status}");
             false
         }
         Err(e) => {
-            eprintln!("Error checking client status: {}", e);
+            eprintln!("Error checking client status: {e}");
             false
         }
     };
@@ -77,8 +77,8 @@ async fn test_session_timeout() -> Result<()> {
     // Check client is still running
     match client.try_wait() {
         Ok(None) => eprintln!("Client connected and running"),
-        Ok(Some(status)) => panic!("Client exited early with status: {}", status),
-        Err(e) => panic!("Error checking client status: {}", e),
+        Ok(Some(status)) => panic!("Client exited early with status: {status}"),
+        Err(e) => panic!("Error checking client status: {e}"),
     }
 
     // Wait longer than timeout
@@ -118,17 +118,14 @@ async fn test_graceful_server_shutdown() -> Result<()> {
     // Check if client exited
     match client.try_wait() {
         Ok(Some(exit_code)) => {
-            eprintln!(
-                "Client exited with code {} after server shutdown",
-                exit_code
-            );
+            eprintln!("Client exited with code {exit_code} after server shutdown");
             // Exit code might be non-zero due to connection loss
         }
         Ok(None) => {
             eprintln!("Client still running after server shutdown");
             client.kill()?;
         }
-        Err(e) => eprintln!("Error checking client status: {}", e),
+        Err(e) => eprintln!("Error checking client status: {e}"),
     }
 
     Ok(())
@@ -197,8 +194,8 @@ async fn test_session_with_pty_operations() -> Result<()> {
             // - Resize the PTY
             // - Send signals
         }
-        Ok(Some(status)) => panic!("Client exited unexpectedly with status: {}", status),
-        Err(e) => panic!("Error checking client status: {}", e),
+        Ok(Some(status)) => panic!("Client exited unexpectedly with status: {status}"),
+        Err(e) => panic!("Error checking client status: {e}"),
     }
 
     // The client should maintain the session
@@ -228,8 +225,7 @@ async fn test_session_id_uniqueness() -> Result<()> {
         // Check key is unique
         assert!(
             !session_keys.contains(&key),
-            "Session key should be unique, but {} was repeated",
-            key
+            "Session key should be unique, but {key} was repeated"
         );
 
         session_keys.push(key);

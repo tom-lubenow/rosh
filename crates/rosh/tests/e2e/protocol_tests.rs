@@ -37,7 +37,7 @@ async fn test_server_handles_invalid_udp_packets() -> Result<()> {
 
     // Server should still be running
     let server_logs = server.read_logs().await?;
-    eprintln!("Server logs after invalid packets:\n{}", server_logs);
+    eprintln!("Server logs after invalid packets:\n{server_logs}");
 
     // Try a valid connection to ensure server is still functional
     let mut client = harness.spawn_client_with_pty(&server).await?;
@@ -46,11 +46,8 @@ async fn test_server_handles_invalid_udp_packets() -> Result<()> {
     // Check if client is running (server didn't crash)
     match client.try_wait() {
         Ok(None) => eprintln!("Client connected successfully after invalid packets"),
-        Ok(Some(status)) => panic!(
-            "Client exited with status {} - server may have crashed",
-            status
-        ),
-        Err(e) => panic!("Error checking client status: {}", e),
+        Ok(Some(status)) => panic!("Client exited with status {status} - server may have crashed"),
+        Err(e) => panic!("Error checking client status: {e}"),
     }
 
     client.kill()?;
@@ -105,7 +102,7 @@ async fn test_connection_with_invalid_quic_handshake() -> Result<()> {
     // Send a TCP connection attempt (server expects QUIC/UDP)
     match tokio::net::TcpStream::connect(server.address()).await {
         Ok(_) => eprintln!("TCP connection unexpectedly succeeded"),
-        Err(e) => eprintln!("TCP connection failed as expected: {}", e),
+        Err(e) => eprintln!("TCP connection failed as expected: {e}"),
     }
 
     // Server should still be running
@@ -137,7 +134,7 @@ async fn test_rapid_connection_attempts() -> Result<()> {
     // Send many packets rapidly
     eprintln!("Sending rapid UDP packets...");
     for i in 0..100 {
-        let packet = format!("packet {}", i).into_bytes();
+        let packet = format!("packet {i}").into_bytes();
         let _ = socket.send_to(&packet, server_addr).await;
         if i % 10 == 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -153,11 +150,8 @@ async fn test_rapid_connection_attempts() -> Result<()> {
 
     match client.try_wait() {
         Ok(None) => eprintln!("Client connected successfully after rapid packets"),
-        Ok(Some(status)) => panic!(
-            "Client exited with status {} - server may be unhealthy",
-            status
-        ),
-        Err(e) => panic!("Error checking client status: {}", e),
+        Ok(Some(status)) => panic!("Client exited with status {status} - server may be unhealthy"),
+        Err(e) => panic!("Error checking client status: {e}"),
     }
 
     client.kill()?;
@@ -177,9 +171,9 @@ async fn test_connection_from_wrong_port() -> Result<()> {
 
     // Try connecting to wrong port
     let wrong_port = server.port() + 1;
-    let wrong_address = format!("127.0.0.1:{}", wrong_port);
+    let wrong_address = format!("127.0.0.1:{wrong_port}");
 
-    eprintln!("Attempting connection to wrong port: {}", wrong_address);
+    eprintln!("Attempting connection to wrong port: {wrong_address}");
 
     let binary_path =
         std::env::var("CARGO_BIN_EXE_rosh").unwrap_or_else(|_| "target/debug/rosh".to_string());
@@ -200,7 +194,7 @@ async fn test_connection_from_wrong_port() -> Result<()> {
     // Client should fail to connect
     match process.try_wait()? {
         Some(exit_code) => {
-            eprintln!("Client exited with code: {}", exit_code);
+            eprintln!("Client exited with code: {exit_code}");
             assert_ne!(
                 exit_code, 0,
                 "Client should fail when connecting to wrong port"

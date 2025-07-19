@@ -13,7 +13,7 @@ async fn test_invalid_session_key_rejected() -> Result<()> {
 
     // Get the correct key from server
     let correct_key = server.get_key().await?;
-    eprintln!("Correct key: {}", correct_key);
+    eprintln!("Correct key: {correct_key}");
 
     // Try to connect with an invalid key
     let invalid_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
@@ -37,7 +37,7 @@ async fn test_invalid_session_key_rejected() -> Result<()> {
     // Check if process exited (it should have failed)
     match process.try_wait()? {
         Some(exit_code) => {
-            eprintln!("Client exited with code: {}", exit_code);
+            eprintln!("Client exited with code: {exit_code}");
             assert_ne!(exit_code, 0, "Client should have failed with invalid key");
         }
         None => {
@@ -78,7 +78,7 @@ async fn test_malformed_session_key_rejected() -> Result<()> {
     ];
 
     for invalid_key in malformed_keys {
-        eprintln!("Testing malformed key: {}", invalid_key);
+        eprintln!("Testing malformed key: {invalid_key}");
 
         let binary_path =
             std::env::var("CARGO_BIN_EXE_rosh").unwrap_or_else(|_| "target/debug/rosh".to_string());
@@ -98,19 +98,13 @@ async fn test_malformed_session_key_rejected() -> Result<()> {
         // Check if process exited (it should have failed)
         match process.try_wait()? {
             Some(exit_code) => {
-                eprintln!(
-                    "Client exited with code: {} for key: {}",
-                    exit_code, invalid_key
-                );
+                eprintln!("Client exited with code: {exit_code} for key: {invalid_key}");
                 assert_ne!(exit_code, 0, "Client should have failed with malformed key");
             }
             None => {
                 // Process is still running, kill it
                 process.kill()?;
-                panic!(
-                    "Client should have exited with malformed key: {}",
-                    invalid_key
-                );
+                panic!("Client should have exited with malformed key: {invalid_key}");
             }
         }
     }
@@ -150,7 +144,7 @@ async fn test_empty_session_key_rejected() -> Result<()> {
     // Check if process exited (it should have failed)
     match process.try_wait()? {
         Some(exit_code) => {
-            eprintln!("Client exited with code: {}", exit_code);
+            eprintln!("Client exited with code: {exit_code}");
             assert_ne!(exit_code, 0, "Client should have failed with empty key");
         }
         None => {
@@ -180,10 +174,7 @@ async fn test_session_key_case_sensitivity() -> Result<()> {
     // Try with different case
     let wrong_case_key = correct_key.to_lowercase();
     if correct_key != wrong_case_key {
-        eprintln!(
-            "Testing case sensitivity - correct: {}, wrong: {}",
-            correct_key, wrong_case_key
-        );
+        eprintln!("Testing case sensitivity - correct: {correct_key}, wrong: {wrong_case_key}");
 
         let binary_path =
             std::env::var("CARGO_BIN_EXE_rosh").unwrap_or_else(|_| "target/debug/rosh".to_string());
@@ -203,7 +194,7 @@ async fn test_session_key_case_sensitivity() -> Result<()> {
         // Check if process exited (it should have failed)
         match process.try_wait()? {
             Some(exit_code) => {
-                eprintln!("Client exited with code: {}", exit_code);
+                eprintln!("Client exited with code: {exit_code}");
                 assert_ne!(
                     exit_code, 0,
                     "Client should have failed with wrong case key"
