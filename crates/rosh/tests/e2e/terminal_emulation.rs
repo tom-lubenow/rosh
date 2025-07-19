@@ -10,7 +10,7 @@ async fn test_echo_command() -> Result<()> {
     let config = TestConfig::default();
     let harness = TestHarness::new(config)?;
     let capture = TerminalCapture::new();
-    let comparator = TerminalComparator::new();
+    let _comparator = TerminalComparator::new();
 
     // Setup server and client
     let mut server = harness.spawn_server().await?;

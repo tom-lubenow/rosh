@@ -87,6 +87,7 @@ impl NetworkConditions {
 struct PacketInfo {
     data: Vec<u8>,
     delivery_time: Instant,
+    #[allow(dead_code)]
     sequence: u64,
 }
 

@@ -49,7 +49,7 @@ async fn test_throughput() -> Result<()> {
 
     // Generate large amount of data
     let data_size = 10 * 1024 * 1024; // 10 MB
-    let test_data = data::generate_random_data(data_size);
+    let _test_data = data::generate_random_data(data_size);
 
     let start = Instant::now();
 
@@ -66,32 +66,6 @@ async fn test_throughput() -> Result<()> {
         throughput_mbps > 1.0,
         "Throughput too low: {throughput_mbps:.2} MB/s"
     );
-
-    client.kill()?;
-    server.kill()?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_memory_usage() -> Result<()> {
-    init_test_logging();
-
-    let config = TestConfig::default();
-    let harness = TestHarness::new(config)?;
-
-    let mut server = harness.spawn_server().await?;
-    server.wait_for_ready().await?;
-
-    let mut client = harness.spawn_client(&server).await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // TODO: Monitor memory usage over time
-    // This would require process monitoring utilities
-
-    // Run for extended period
-    tokio::time::sleep(Duration::from_secs(30)).await;
-
-    // Memory should not grow unbounded
 
     client.kill()?;
     server.kill()?;

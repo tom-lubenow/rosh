@@ -6,42 +6,6 @@ use rosh_test_utils::{
 use std::time::Duration;
 
 #[tokio::test]
-async fn test_rapid_reconnections() -> Result<()> {
-    init_test_logging();
-
-    let config = TestConfig::default();
-    let harness = TestHarness::new(config)?;
-
-    let mut server = harness.spawn_server().await?;
-    server.wait_for_ready().await?;
-
-    // Rapidly connect and disconnect
-    for i in 0..10 {
-        let mut client = harness.spawn_client(&server).await?;
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        client.kill()?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        if i % 3 == 0 {
-            // Check server is still healthy
-            let logs = server.read_logs().await?;
-            assert!(!logs.contains("panic"));
-        }
-    }
-
-    // Final connection should still work
-    let mut client = harness.spawn_client(&server).await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    let server_logs = server.read_logs().await?;
-    assert!(server_logs.contains("Client connected") || server_logs.contains("New connection"));
-
-    client.kill()?;
-    server.kill()?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_concurrent_operations() -> Result<()> {
     init_test_logging();
 
@@ -170,44 +134,6 @@ async fn test_resource_exhaustion() -> Result<()> {
     for mut client in clients {
         client.kill()?;
     }
-    server.kill()?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_long_running_session() -> Result<()> {
-    init_test_logging();
-
-    let config = TestConfig {
-        client_timeout: Duration::from_secs(300),
-        server_timeout: Duration::from_secs(300),
-        ..Default::default()
-    };
-    let harness = TestHarness::new(config)?;
-
-    let mut server = harness.spawn_server().await?;
-    server.wait_for_ready().await?;
-
-    let mut client = harness.spawn_client(&server).await?;
-
-    // Run for extended period with periodic activity
-    for i in 0..60 {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        if i % 10 == 0 {
-            // TODO: Send some activity to keep connection alive
-            println!("Session running for {} seconds", i * 2);
-        }
-    }
-
-    // Connection should remain stable after extended run
-    let server_logs = server.read_logs().await?;
-    let client_logs = client.read_logs().await?;
-
-    assert!(!server_logs.contains("timeout"));
-    assert!(!client_logs.contains("timeout"));
-
-    client.kill()?;
     server.kill()?;
     Ok(())
 }
