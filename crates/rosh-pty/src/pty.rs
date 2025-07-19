@@ -160,7 +160,7 @@ impl Pty {
                 drop(slave_owned);
 
                 Ok(PtyProcess {
-                    master,
+                    master: Some(master),
                     child_pid: child,
                 })
             }
@@ -172,7 +172,7 @@ impl Pty {
                 // Extract slave FD without closing (needed for dup2)
                 let slave_raw = slave_owned.into_raw();
 
-                // Create new session
+                // Create new session (this also creates a new process group)
                 setsid().expect("setsid failed");
 
                 // Set up slave as stdin/stdout/stderr
@@ -190,6 +190,15 @@ impl Pty {
                     }
                 }
 
+                // Make this process group the foreground process group
+                unsafe {
+                    let pgid = libc::getpgrp();
+                    if libc::tcsetpgrp(0, pgid) < 0 {
+                        // This might fail in some environments, but that's OK
+                        eprintln!("tcsetpgrp failed: {}", io::Error::last_os_error());
+                    }
+                }
+
                 // Execute the command
                 let err = command.exec();
                 eprintln!("Failed to execute command: {err}");
@@ -203,7 +212,7 @@ impl Pty {
 
 /// A process running in a PTY
 pub struct PtyProcess {
-    master: PtyMaster,
+    master: Option<PtyMaster>,
     child_pid: nix::unistd::Pid,
 }
 
@@ -215,12 +224,19 @@ impl PtyProcess {
 
     /// Get the master PTY
     pub fn master(&self) -> &PtyMaster {
-        &self.master
+        self.master.as_ref().expect("Master PTY already taken")
     }
 
     /// Take ownership of the master PTY
-    pub fn take_master(self) -> PtyMaster {
-        self.master
+    pub fn take_master(mut self) -> PtyMaster {
+        // Take the master, leaving None in its place
+        // This prevents Drop from being called on self since we're consuming it
+        let master = self.master.take().expect("Master PTY already taken");
+
+        // Forget self to prevent Drop from running
+        std::mem::forget(self);
+
+        master
     }
 
     /// Wait for the process to exit

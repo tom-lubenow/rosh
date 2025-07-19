@@ -30,7 +30,7 @@ pub enum SessionEvent {
 /// A PTY session with terminal emulation
 pub struct PtySession {
     /// The PTY process
-    process: PtyProcess,
+    process: Option<PtyProcess>,
 
     /// Terminal emulator
     terminal: Arc<Mutex<Terminal>>,
@@ -69,7 +69,7 @@ impl PtySession {
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
 
         let session = Self {
-            process,
+            process: Some(process),
             terminal,
             event_tx,
             shutdown_tx: Some(shutdown_tx),
@@ -81,8 +81,12 @@ impl PtySession {
 
     /// Start the session I/O loop
     pub async fn start(mut self) -> Result<(), PtyError> {
-        let pid = self.process.pid();
-        let master = self.process.take_master();
+        let process = self
+            .process
+            .take()
+            .ok_or_else(|| PtyError::IoError(std::io::Error::other("Process already taken")))?;
+        let pid = process.pid();
+        let master = process.take_master();
         let async_master = AsyncPtyMaster::new(master)?;
 
         let (read_half, write_half) = tokio::io::split(async_master);
@@ -188,12 +192,18 @@ impl PtySession {
             ws_ypixel: 0,
         };
 
-        let fd = self.process.master().as_raw_fd();
-        unsafe {
-            let ret = libc::ioctl(fd, libc::TIOCSWINSZ, &winsize as *const _);
-            if ret < 0 {
-                return Err(PtyError::IoError(std::io::Error::last_os_error()));
+        if let Some(ref process) = self.process {
+            let fd = process.master().as_raw_fd();
+            unsafe {
+                let ret = libc::ioctl(fd, libc::TIOCSWINSZ, &winsize as *const _);
+                if ret < 0 {
+                    return Err(PtyError::IoError(std::io::Error::last_os_error()));
+                }
             }
+        } else {
+            return Err(PtyError::IoError(std::io::Error::other(
+                "Process already taken",
+            )));
         }
 
         // Resize terminal emulator
@@ -215,7 +225,13 @@ impl PtySession {
 
     /// Kill the process
     pub fn kill(&self) -> Result<(), PtyError> {
-        self.process.kill()
+        if let Some(ref process) = self.process {
+            process.kill()
+        } else {
+            Err(PtyError::IoError(std::io::Error::other(
+                "Process already taken",
+            )))
+        }
     }
 
     /// Shutdown the session
