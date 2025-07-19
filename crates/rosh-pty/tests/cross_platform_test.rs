@@ -289,17 +289,33 @@ mod unix_tests {
                     let output = String::from_utf8_lossy(&state.screen);
                     if output.contains("HOME=") {
                         got_home = true;
-                        // Home path format differs between platforms
-                        if cfg!(target_os = "macos") {
-                            assert!(
-                                output.contains("/Users/") || output.contains("/home/"),
-                                "Should have valid home path on macOS"
-                            );
-                        } else if cfg!(target_os = "linux") {
-                            assert!(
-                                output.contains("/home/") || output.contains("/root"),
-                                "Should have valid home path on Linux"
-                            );
+                        // Extract the HOME value from the output
+                        if let Some(home_start) = output.find("HOME=") {
+                            let home_line = &output[home_start..];
+                            if let Some(end) = home_line.find(['\n', '\r']) {
+                                let home_value = &home_line[5..end]; // Skip "HOME="
+
+                                // Verify it's an absolute path
+                                assert!(
+                                    home_value.starts_with('/'),
+                                    "HOME should be an absolute path, got: {home_value}"
+                                );
+
+                                // Platform-specific validation
+                                if cfg!(target_os = "macos") {
+                                    // macOS typically uses /Users/ or /home/ but can have others in containers
+                                    assert!(
+                                        !home_value.is_empty(),
+                                        "HOME should not be empty on macOS"
+                                    );
+                                } else if cfg!(target_os = "linux") {
+                                    // Linux can have various HOME paths: /home/, /root, /tmp/nix-build-*, /build, etc.
+                                    assert!(
+                                        !home_value.is_empty(),
+                                        "HOME should not be empty on Linux"
+                                    );
+                                }
+                            }
                         }
                         break;
                     }
