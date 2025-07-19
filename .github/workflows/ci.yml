@@ -130,13 +130,13 @@ jobs:
       run: cargo build --release --target ${{ matrix.target }}
     
     - name: Upload client binary
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: rosh-${{ matrix.target }}
         path: target/${{ matrix.target }}/release/rosh${{ matrix.binary_postfix }}
     
     - name: Upload server binary
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: rosh-server-${{ matrix.target }}
         path: target/${{ matrix.target }}/release/rosh-server${{ matrix.binary_postfix }}
