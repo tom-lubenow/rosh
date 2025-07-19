@@ -18,6 +18,11 @@ thoughtfully crafted along with expectations of their timing behavior.
 For tests, we should prefer smaller files. One file containing 10+ tests is okay if they're all really short, and quick.
 Large tests should be grouped based on whether they could share code and reduce test setup duplication.
 
+CRITICAL TEST PERFORMANCE REQUIREMENT: Any test that takes longer than 20 seconds is a FAILURE and must be removed
+or rewritten. Slow tests destroy the entire test suite's value because they discourage running tests frequently.
+A test suite is only as useful as its slowest test. Tests that take 30-60+ seconds are absolutely unacceptable.
+Delete them immediately - they don't get to hold up development. Fast feedback loops are non-negotiable.
+
 You should keep commits as you make progress. NEVER commit anything that does not pass all above quality checks. Prefer
 not to keep in disabled or nonfunctional tests, it's just noise. 
 

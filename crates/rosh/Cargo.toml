@@ -35,3 +35,5 @@ rand = "0.8"
 tempfile = "3.10"
 dirs = "5.0"
 async-trait = "0.1"
+rosh-test-utils = { path = "../rosh-test-utils" }
+futures = "0.3"
