@@ -199,9 +199,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_kill() {
-        // Start a long-running process
-        let mut cmd = Command::new("sleep");
-        cmd.arg("60");
+        // Start a process that outputs something immediately
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo 'Process started'; sleep 60");
 
         let (session, mut events) = SessionBuilder::new()
             .command(cmd)
@@ -209,21 +209,31 @@ mod tests {
             .await
             .expect("Should create session");
 
-        // We need to test kill without consuming the session
-        // In practice, you'd keep a handle to kill the process
-        // For this test, we'll create a second session to demonstrate
-
         // Start session
         tokio::spawn(async move {
             let _ = session.start().await;
         });
 
-        // For testing kill, we'll just verify the event system works
-        // by checking that we can receive events
-        let got_event = timeout(Duration::from_millis(500), events.recv()).await;
+        // Wait for initial output
+        let mut got_output = false;
+        timeout(Duration::from_secs(2), async {
+            while let Some(event) = events.recv().await {
+                if let SessionEvent::StateChanged(state) = event {
+                    let output = String::from_utf8_lossy(&state.screen);
+                    if output.contains("Process started") {
+                        got_output = true;
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .ok();
 
-        // We should get at least a state change event
-        assert!(got_event.is_ok(), "Should receive events from session");
+        assert!(got_output, "Should receive output from session");
+
+        // Note: Actual kill functionality would be tested with a handle to the session
+        // This test verifies the session starts and produces events correctly
     }
 
     #[tokio::test]
