@@ -60,8 +60,10 @@ async fn test_session_timeout() -> Result<()> {
     init_test_logging();
 
     // Create config with short timeout
-    let mut config = TestConfig::default();
-    config.server_timeout = Duration::from_secs(5);
+    let config = TestConfig {
+        server_timeout: Duration::from_secs(5),
+        ..Default::default()
+    };
 
     let harness = TestHarness::new(config)?;
 
