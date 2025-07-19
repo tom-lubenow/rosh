@@ -6,32 +6,19 @@ description = "Test utilities for rosh e2e testing"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-rosh = { path = "../rosh" }
-rosh-crypto = { path = "../rosh-crypto" }
-rosh-network = { path = "../rosh-network" }
-rosh-terminal = { path = "../rosh-terminal" }
-rosh-state = { path = "../rosh-state" }
 rosh-pty = { path = "../rosh-pty" }
 
 tokio = { version = "1.37", features = ["full", "test-util"] }
 anyhow = "1.0"
-thiserror = "1.0"
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3.10"
 rand = "0.8"
-futures = "0.3"
 async-trait = "0.1"
 portpicker = "0.1"
 regex = "1.10"
 
-# Network simulation
-surge-ping = "0.8"
-socket2 = "0.5"
-
 # Terminal testing
 similar = "2.4"
-termwiz = "0.22"
 strip-ansi-escapes = "0.2"
 
 [dev-dependencies]

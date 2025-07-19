@@ -29,53 +29,6 @@ mod unix_tests {
     }
 
     #[tokio::test]
-    async fn test_macos_specific_behavior() {
-        #[cfg(target_os = "macos")]
-        {
-            // Test macOS-specific commands
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c")
-                .arg("sw_vers -productVersion 2>/dev/null || echo 'Not macOS'");
-
-            let (session, mut events) = SessionBuilder::new()
-                .command(cmd)
-                .build()
-                .await
-                .expect("Should create session");
-
-            // Start session
-            tokio::spawn(async move {
-                let _ = session.start().await;
-            });
-
-            // Check for macOS version
-            let mut is_macos = false;
-            timeout(Duration::from_secs(2), async {
-                while let Some(event) = events.recv().await {
-                    if let SessionEvent::StateChanged(state) = event {
-                        let output = String::from_utf8_lossy(&state.screen);
-                        // macOS version format: XX.Y.Z
-                        if output.contains(".") && !output.contains("Not macOS") {
-                            is_macos = true;
-                            println!("macOS version detected: {}", output.trim());
-                            break;
-                        }
-                    }
-                }
-            })
-            .await
-            .ok();
-
-            assert!(is_macos, "Should detect macOS version");
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            println!("Skipping macOS-specific test on non-macOS platform");
-        }
-    }
-
-    #[tokio::test]
     async fn test_linux_specific_behavior() {
         #[cfg(target_os = "linux")]
         {

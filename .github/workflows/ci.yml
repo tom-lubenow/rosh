@@ -6,40 +6,67 @@ on:
   pull_request:
     branches: [ main ]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  ci:
-    name: CI - ${{ matrix.os }}
+  # Lint checks - run once on ubuntu-latest
+  lint:
+    name: Lint Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          
+      - uses: cachix/cachix-action@v15
+        with:
+          name: rosh
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      
+      - uses: HatsuneMiku3939/direnv-action@v1      
+
+      - name: Rust Formatting
+        run: cargo fmt --all -- --check
+        
+      - name: Unused Rust Dependencies
+        run: cargo machete
+
+      - name: Rust Lint
+        run: |
+           unset CARGO_BUILD_TARGET
+           cargo clippy --all-features -- -D warnings
+        
+  # Matrix for platform-specific tests
+  nix-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+      - id: set-matrix
+        name: Generate Nix Matrix
+        run: |
+          set -Eeu
+          matrix="$(nix eval --json '.#githubActions.matrix')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  nix-build:
+    name: ${{ matrix.name }} (${{ matrix.system }})
+    needs: nix-matrix
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        os: [macos-latest]  # ubuntu-latest
+      matrix: ${{fromJSON(needs.nix-matrix.outputs.matrix)}}
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-
-    - name: Install cargo-nextest
-      uses: taiki-e/install-action@nextest
-
-    - name: Format
-      run: cargo fmt --all -- --check
-
-    - name: Check
-      run: cargo check    
-
-    - name: Clippy
-      run: cargo clippy -- -D warnings
-
-    - name: Test
-      run: cargo nextest run
-
-    - name: Build
-      run: cargo build --release
-
+      - uses: actions/checkout@v4
+      
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          
+      - uses: cachix/cachix-action@v15
+        with:
+          name: rosh
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          
+      - run: nix build -L --accept-flake-config '.#${{ matrix.attr }}'
