@@ -65,6 +65,10 @@ struct Args {
     /// One-shot mode: generate key, serve one connection, then exit
     #[arg(long)]
     one_shot: bool,
+
+    /// Timeout in seconds for one-shot mode (0 = no timeout)
+    #[arg(long, default_value = "0")]
+    timeout: u64,
 }
 
 /// Active session state
@@ -140,19 +144,28 @@ pub async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
-    let log_level = match args.log_level {
-        LogLevel::Trace => tracing::Level::TRACE,
-        LogLevel::Debug => tracing::Level::DEBUG,
-        LogLevel::Info => tracing::Level::INFO,
-        LogLevel::Warn => tracing::Level::WARN,
-        LogLevel::Error => tracing::Level::ERROR,
+    let log_level = if args.one_shot {
+        // In one-shot mode, only show errors to avoid interfering with terminal
+        tracing::Level::ERROR
+    } else {
+        match args.log_level {
+            LogLevel::Trace => tracing::Level::TRACE,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Error => tracing::Level::ERROR,
+        }
     };
 
-    // In one-shot mode, only output to stderr
+    // In one-shot mode, only output to stderr with minimal formatting
     if args.one_shot {
         tracing_subscriber::fmt()
             .with_max_level(log_level)
             .with_writer(std::io::stderr)
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .compact()
             .init();
     } else {
         tracing_subscriber::fmt().with_max_level(log_level).init();
@@ -168,7 +181,9 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    info!("Starting Rosh server on {}", args.bind);
+    if !args.one_shot {
+        info!("Starting Rosh server on {}", args.bind);
+    }
 
     // Load certificates
     let (cert_chain, private_key) = if args.one_shot {
@@ -219,12 +234,36 @@ pub async fn run() -> Result<()> {
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
 
-    info!("Server listening on {}", bound_addr);
+    if !args.one_shot {
+        info!("Server listening on {}", bound_addr);
+    }
 
     // Accept connections
     let mut _connection_count = 0;
+
+    // Set up timeout for one-shot mode
+    let timeout_duration = if args.one_shot && args.timeout > 0 {
+        Some(Duration::from_secs(args.timeout))
+    } else {
+        None
+    };
+
     loop {
-        match transport.accept().await {
+        let accept_result = if let Some(timeout) = timeout_duration {
+            // Accept with timeout
+            match time::timeout(timeout, transport.accept()).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Timeout waiting for connection");
+                    return Ok(());
+                }
+            }
+        } else {
+            // Accept without timeout
+            transport.accept().await
+        };
+
+        match accept_result {
             Ok((connection, client_addr)) => {
                 info!("New connection from {}", client_addr);
 
@@ -296,7 +335,13 @@ async fn handle_connection(
             session_keys_bytes,
             terminal_width,
             terminal_height,
-        } => (session_keys_bytes, terminal_width, terminal_height),
+        } => {
+            info!(
+                "Received handshake with terminal dimensions: {}x{}",
+                terminal_width, terminal_height
+            );
+            (session_keys_bytes, terminal_width, terminal_height)
+        }
         _ => anyhow::bail!("Expected handshake message"),
     };
 
@@ -314,11 +359,17 @@ async fn handle_connection(
     info!("Creating session {} for {}", session_id, client_addr);
 
     // Create PTY session
+    info!(
+        "Creating PTY session with dimensions: {}x{}",
+        terminal_width, terminal_height
+    );
     let (pty_session, mut pty_events) = SessionBuilder::new()
         .dimensions(terminal_height, terminal_width)
+        .env("ROSH", "1")
         .build()
         .await
         .context("Failed to create PTY session")?;
+    info!("PTY session created successfully");
 
     // Create state synchronizer
     let initial_state = pty_session.get_state().await;

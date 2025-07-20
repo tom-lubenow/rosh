@@ -20,5 +20,14 @@ first class citizens of this application. They should be high quality, designed 
 refactored periodically to promote good architecture and code reuse. Prefer not to keep in disabled or nonfunctional tests,
 they're just noise.
 
+For manual interation, you use the following workflow on the nixos vm we have running, called "builder"
+::: nix build .#packages.aarch64-linux.default  # builds the linux version of the package into result
+::: ssh builder rm rosh-server  # deletes the server binary if it exists already on the remote
+::: scp result/bin/rosh-server builder:  # copies the linux server binary to ~/rosh-server
+::: nix build .#packages.aarch64-darwin.default  # builds the macos version of rosh client
+Always keep track of which one you built last because of the arch difference between the client and server.
+You can then test connection via:
+::: rosh builder -d --rosh-server-bin '~/rosh-server' CMD
+
 Keep commits as you make progress. Our pre-commit script will ensure only code meeting high quality standards can be
 committed.
