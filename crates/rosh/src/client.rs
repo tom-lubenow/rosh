@@ -486,8 +486,12 @@ pub async fn run() -> Result<()> {
     // Derive session keys
     let mut key_derivation = KeyDerivation::new(&key_bytes);
     let session_keys = SessionKeys {
-        client_write_key: key_derivation.derive_key(b"client write"),
-        server_write_key: key_derivation.derive_key(b"server write"),
+        client_write_key: key_derivation
+            .derive_key(b"client write")
+            .context("Failed to derive client write key")?,
+        server_write_key: key_derivation
+            .derive_key(b"server write")
+            .context("Failed to derive server write key")?,
     };
 
     // Get terminal dimensions

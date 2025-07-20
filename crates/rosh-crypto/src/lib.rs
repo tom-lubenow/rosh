@@ -33,4 +33,7 @@ pub enum CryptoError {
 
     #[error("Key exchange failed: {0}")]
     KeyExchangeFailed(String),
+
+    #[error("Key derivation failed: {0}")]
+    KeyDerivationFailed(String),
 }

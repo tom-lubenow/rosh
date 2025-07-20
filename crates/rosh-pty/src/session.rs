@@ -95,7 +95,13 @@ impl PtySession {
 
         let terminal = self.terminal.clone();
         let event_tx = self.event_tx.clone();
-        let mut shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let mut shutdown_rx = self
+            .shutdown_tx
+            .as_ref()
+            .ok_or_else(|| {
+                PtyError::IoError(std::io::Error::other("Shutdown channel not initialized"))
+            })?
+            .subscribe();
 
         // Store write half for input handling
         self.write_half = Some(write_half.clone());

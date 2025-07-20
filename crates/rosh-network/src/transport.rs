@@ -94,7 +94,10 @@ impl ClientTransport {
         let _client_config = create_client_config(config)?;
 
         // Bind to any available port
-        let endpoint = Endpoint::client("[::]:0".parse().unwrap())
+        let addr = "[::]:0"
+            .parse()
+            .map_err(|e| NetworkError::TransportError(format!("Failed to parse address: {e}")))?;
+        let endpoint = Endpoint::client(addr)
             .map_err(|e| NetworkError::TransportError(format!("Failed to create endpoint: {e}")))?;
 
         Ok(Self {
@@ -255,7 +258,7 @@ fn create_client_config(config: RoshTransportConfig) -> Result<ClientConfig, Net
         })?,
     ));
 
-    client_config.transport_config(Arc::new(create_transport_config(config)));
+    client_config.transport_config(Arc::new(create_transport_config(config)?));
 
     Ok(client_config)
 }
@@ -287,16 +290,21 @@ fn create_server_config(
         })?,
     ));
 
-    server_config.transport_config(Arc::new(create_transport_config(config)));
+    server_config.transport_config(Arc::new(create_transport_config(config)?));
 
     Ok((server_config, cert_der))
 }
 
 /// Create QUIC transport configuration
-fn create_transport_config(config: RoshTransportConfig) -> quinn::TransportConfig {
+fn create_transport_config(
+    config: RoshTransportConfig,
+) -> Result<quinn::TransportConfig, NetworkError> {
     let mut transport = quinn::TransportConfig::default();
 
-    transport.max_idle_timeout(Some(config.max_idle_timeout.try_into().unwrap()));
+    let idle_timeout = config.max_idle_timeout.try_into().map_err(|_| {
+        NetworkError::TransportError("max_idle_timeout value too large for VarInt".to_string())
+    })?;
+    transport.max_idle_timeout(Some(idle_timeout));
     transport.keep_alive_interval(Some(config.keep_alive_interval));
 
     // Set congestion control parameters
@@ -312,7 +320,7 @@ fn create_transport_config(config: RoshTransportConfig) -> quinn::TransportConfi
     cc_config.initial_window(config.initial_window as u64);
     transport.congestion_controller_factory(Arc::new(cc_config));
 
-    transport
+    Ok(transport)
 }
 
 /// Wrapper for client transport that provides connection method
