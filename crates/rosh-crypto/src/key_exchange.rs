@@ -148,7 +148,7 @@ impl KeyDerivation {
     }
 
     /// Derive a key for a specific purpose
-    pub fn derive_key(&mut self, info: &[u8]) -> Vec<u8> {
+    pub fn derive_key(&mut self, info: &[u8]) -> Result<Vec<u8>, CryptoError> {
         use ring::hkdf;
 
         let salt = ring::hkdf::Salt::new(hkdf::HKDF_SHA256, &[]);
@@ -156,10 +156,14 @@ impl KeyDerivation {
 
         let mut output = vec![0u8; 32]; // Always derive 32 bytes
         let info_slice = [info];
-        let okm = prk.expand(&info_slice, ring::hkdf::HKDF_SHA256).unwrap();
-        okm.fill(&mut output).unwrap();
+        let okm = prk
+            .expand(&info_slice, ring::hkdf::HKDF_SHA256)
+            .map_err(|_| CryptoError::KeyDerivationFailed("HKDF expansion failed".to_string()))?;
+        okm.fill(&mut output).map_err(|_| {
+            CryptoError::KeyDerivationFailed("Failed to fill output buffer".to_string())
+        })?;
 
-        output
+        Ok(output)
     }
 }
 

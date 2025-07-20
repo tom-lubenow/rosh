@@ -99,7 +99,11 @@ impl Message {
     pub fn timestamp_now() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or({
+                // If system time is before UNIX_EPOCH, use 0 as fallback
+                // This should never happen in practice but prevents panic
+                std::time::Duration::ZERO
+            })
             .as_micros() as u64
     }
 

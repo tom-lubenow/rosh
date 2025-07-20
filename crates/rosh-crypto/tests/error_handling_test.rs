@@ -85,18 +85,18 @@ fn test_key_derivation_edge_cases() {
     // Test with empty key
     let empty_key = b"";
     let mut kd = KeyDerivation::new(empty_key);
-    let derived = kd.derive_key(b"test");
+    let derived = kd.derive_key(b"test").unwrap();
     assert_eq!(derived.len(), 32); // Should still produce 32 bytes
 
     // Test with very long key
     let long_key = vec![0u8; 1024];
     let mut kd = KeyDerivation::new(&long_key);
-    let derived = kd.derive_key(b"test");
+    let derived = kd.derive_key(b"test").unwrap();
     assert_eq!(derived.len(), 32);
 
     // Test with empty info
     let mut kd = KeyDerivation::new(b"key");
-    let derived = kd.derive_key(b"");
+    let derived = kd.derive_key(b"").unwrap();
     assert_eq!(derived.len(), 32);
 }
 

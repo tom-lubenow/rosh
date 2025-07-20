@@ -133,8 +133,10 @@ impl StateSynchronizer {
             let mut rtt = Duration::from_millis(0);
             while let Some(pending) = self.pending_states.front() {
                 if pending.seq_num <= ack_num {
-                    let state = self.pending_states.pop_front().unwrap();
-                    rtt = state.sent_at.elapsed();
+                    // Safe to unwrap as we just checked with front()
+                    if let Some(state) = self.pending_states.pop_front() {
+                        rtt = state.sent_at.elapsed();
+                    }
                 } else {
                     break;
                 }
