@@ -3937,7 +3937,7 @@ rec {
           }
           {
             name = "rustls";
-            packageId = "rustls";
+            packageId = "rustls 0.23.29";
             optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
@@ -4052,7 +4052,7 @@ rec {
           }
           {
             name = "rustls";
-            packageId = "rustls";
+            packageId = "rustls 0.23.29";
             optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
@@ -5105,6 +5105,10 @@ rec {
             packageId = "libc";
           }
           {
+            name = "quinn";
+            packageId = "quinn";
+          }
+          {
             name = "rand";
             packageId = "rand 0.8.5";
           }
@@ -5138,6 +5142,10 @@ rec {
           {
             name = "rosh-terminal";
             packageId = "rosh-terminal";
+          }
+          {
+            name = "rustls";
+            packageId = "rustls 0.21.12";
           }
           {
             name = "serde";
@@ -5288,7 +5296,7 @@ rec {
           }
           {
             name = "rustls";
-            packageId = "rustls";
+            packageId = "rustls 0.23.29";
             usesDefaultFeatures = false;
             features = [ "ring" ];
           }
@@ -5652,7 +5660,48 @@ rec {
         };
         resolvedDefaultFeatures = [ "alloc" "default" "fs" "std" ];
       };
-      "rustls" = rec {
+      "rustls 0.21.12" = rec {
+        crateName = "rustls";
+        version = "0.21.12";
+        edition = "2021";
+        sha256 = "0gjdg2a9r81sdwkyw3n5yfbkrr6p9gyk3xr2kcsr3cs83x6s2miz";
+        dependencies = [
+          {
+            name = "log";
+            packageId = "log";
+            optional = true;
+          }
+          {
+            name = "ring";
+            packageId = "ring 0.17.14";
+          }
+          {
+            name = "rustls-webpki";
+            packageId = "rustls-webpki 0.101.7";
+            rename = "webpki";
+            features = [ "alloc" "std" ];
+          }
+          {
+            name = "sct";
+            packageId = "sct";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "log";
+            packageId = "log";
+          }
+        ];
+        features = {
+          "default" = [ "logging" "tls12" ];
+          "log" = [ "dep:log" ];
+          "logging" = [ "log" ];
+          "read_buf" = [ "rustversion" ];
+          "rustversion" = [ "dep:rustversion" ];
+        };
+        resolvedDefaultFeatures = [ "default" "log" "logging" "tls12" ];
+      };
+      "rustls 0.23.29" = rec {
         crateName = "rustls";
         version = "0.23.29";
         edition = "2021";
@@ -5677,7 +5726,7 @@ rec {
           }
           {
             name = "rustls-webpki";
-            packageId = "rustls-webpki";
+            packageId = "rustls-webpki 0.103.4";
             rename = "webpki";
             usesDefaultFeatures = false;
             features = [ "alloc" ];
@@ -5812,7 +5861,7 @@ rec {
           }
           {
             name = "rustls";
-            packageId = "rustls";
+            packageId = "rustls 0.23.29";
             usesDefaultFeatures = false;
             features = [ "std" ];
           }
@@ -5828,21 +5877,21 @@ rec {
           }
           {
             name = "rustls-webpki";
-            packageId = "rustls-webpki";
+            packageId = "rustls-webpki 0.103.4";
             rename = "webpki";
             usesDefaultFeatures = false;
             target = { target, features }: ((target."unix" or false) && (!("android" == target."os" or null)) && (!("apple" == target."vendor" or null)) && (!("wasm32" == target."arch" or null)));
           }
           {
             name = "rustls-webpki";
-            packageId = "rustls-webpki";
+            packageId = "rustls-webpki 0.103.4";
             rename = "webpki";
             usesDefaultFeatures = false;
             target = { target, features }: ("wasm32" == target."arch" or null);
           }
           {
             name = "rustls-webpki";
-            packageId = "rustls-webpki";
+            packageId = "rustls-webpki 0.103.4";
             rename = "webpki";
             usesDefaultFeatures = false;
             target = { target, features }: ("android" == target."os" or null);
@@ -5875,7 +5924,7 @@ rec {
         devDependencies = [
           {
             name = "rustls";
-            packageId = "rustls";
+            packageId = "rustls 0.23.29";
             usesDefaultFeatures = false;
             features = [ "ring" ];
           }
@@ -5902,7 +5951,31 @@ rec {
         libName = "rustls_platform_verifier_android";
 
       };
-      "rustls-webpki" = rec {
+      "rustls-webpki 0.101.7" = rec {
+        crateName = "rustls-webpki";
+        version = "0.101.7";
+        edition = "2021";
+        sha256 = "0rapfhpkqp75552i8r0y7f4vq7csb4k7gjjans0df73sxv8paqlb";
+        libName = "webpki";
+        dependencies = [
+          {
+            name = "ring";
+            packageId = "ring 0.17.14";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "untrusted";
+            packageId = "untrusted 0.9.0";
+          }
+        ];
+        features = {
+          "alloc" = [ "ring/alloc" ];
+          "default" = [ "std" ];
+          "std" = [ "alloc" ];
+        };
+        resolvedDefaultFeatures = [ "alloc" "default" "std" ];
+      };
+      "rustls-webpki 0.103.4" = rec {
         crateName = "rustls-webpki";
         version = "0.103.4";
         edition = "2021";
@@ -6070,6 +6143,26 @@ rec {
         features = {
           "default" = [ "use_std" ];
         };
+      };
+      "sct" = rec {
+        crateName = "sct";
+        version = "0.7.1";
+        edition = "2021";
+        sha256 = "056lmi2xkzdg1dbai6ha3n57s18cbip4pnmpdhyljli3m99n216s";
+        authors = [
+          "Joseph Birr-Pixton <jpixton@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "ring";
+            packageId = "ring 0.17.14";
+          }
+          {
+            name = "untrusted";
+            packageId = "untrusted 0.9.0";
+          }
+        ];
+
       };
       "seahash" = rec {
         crateName = "seahash";
