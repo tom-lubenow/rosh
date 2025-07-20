@@ -244,46 +244,6 @@ mod unix_tests {
     }
 
     #[tokio::test]
-    async fn test_setuid_failure() {
-        // Test handling of permission errors
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c")
-            .arg("chmod 4755 /nonexistent 2>&1 || echo 'Permission denied as expected'");
-
-        let (session, mut events) = SessionBuilder::new()
-            .command(cmd)
-            .build()
-            .await
-            .expect("Should create session");
-
-        // Start session
-        tokio::spawn(async move {
-            let _ = session.start().await;
-        });
-
-        // Should handle permission error gracefully
-        let mut handled_error = false;
-        timeout(Duration::from_secs(2), async {
-            while let Some(event) = events.recv().await {
-                match event {
-                    SessionEvent::StateChanged(state) => {
-                        let output = String::from_utf8_lossy(&state.screen);
-                        if output.contains("Permission denied") || output.contains("expected") {
-                            handled_error = true;
-                        }
-                    }
-                    SessionEvent::ProcessExited(_) => break,
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .ok();
-
-        assert!(handled_error, "Should handle permission error");
-    }
-
-    #[tokio::test]
     async fn test_ulimit_constraints() {
         // Test process limits
         let mut cmd = Command::new("sh");

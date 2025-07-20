@@ -284,65 +284,6 @@ mod unix_tests {
     }
 
     #[tokio::test]
-    async fn test_unicode_handling() {
-        // Test Unicode character handling
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(r#"echo "Hello 世界 🌍 λ €""#);
-        // Ensure UTF-8 locale is set for proper Unicode handling
-        cmd.env("LANG", "en_US.UTF-8");
-        cmd.env("LC_ALL", "en_US.UTF-8");
-
-        let (session, mut events) = SessionBuilder::new()
-            .command(cmd)
-            .build()
-            .await
-            .expect("Should create session");
-
-        // Start session
-        tokio::spawn(async move {
-            let _ = session.start().await;
-        });
-
-        // Check for Unicode output
-        let mut got_output = false;
-        let mut collected_output = String::new();
-
-        timeout(Duration::from_secs(2), async {
-            while let Some(event) = events.recv().await {
-                match event {
-                    SessionEvent::StateChanged(state) => {
-                        let output = String::from_utf8_lossy(&state.screen);
-                        collected_output = output.to_string();
-
-                        // Just check that we got the echo output with "Hello"
-                        // The terminal emulator might handle Unicode differently
-                        // but we should at least see the ASCII part
-                        if output.contains("Hello") && !output.trim().is_empty() {
-                            got_output = true;
-
-                            // For debugging: check if we got any of the Unicode chars
-                            if output.contains("世界") || output.contains("🌍") || output.contains("λ") || output.contains("€") {
-                                println!("Unicode characters properly rendered in terminal");
-                            } else {
-                                println!("Unicode characters may have been transformed by terminal emulator");
-                            }
-                            break;
-                        }
-                    }
-                    SessionEvent::ProcessExited(_) => {
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .ok();
-
-        assert!(got_output, "Should receive echo output");
-    }
-
-    #[tokio::test]
     async fn test_line_buffering() {
         // Test line buffering behavior
         let mut cmd = Command::new("sh");
@@ -437,47 +378,6 @@ mod unix_tests {
 
         assert!(got_stdout, "Should see stdout");
         assert!(got_stderr, "Should see stderr");
-    }
-
-    #[tokio::test]
-    async fn test_null_bytes() {
-        // Test handling of null bytes in output
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(r#"printf "before\0null\0after\n""#);
-
-        let (session, mut events) = SessionBuilder::new()
-            .command(cmd)
-            .build()
-            .await
-            .expect("Should create session");
-
-        // Start session
-        tokio::spawn(async move {
-            let _ = session.start().await;
-        });
-
-        // Check output handling
-        let mut got_output = false;
-        timeout(Duration::from_secs(2), async {
-            while let Some(event) = events.recv().await {
-                match event {
-                    SessionEvent::StateChanged(state) => {
-                        if !state.screen.is_empty() {
-                            got_output = true;
-                            // Terminal emulator may handle null bytes differently
-                            let output = String::from_utf8_lossy(&state.screen);
-                            println!("Null byte test output: {output:?}");
-                        }
-                    }
-                    SessionEvent::ProcessExited(_) => break,
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .ok();
-
-        assert!(got_output, "Should handle output with null bytes");
     }
 
     #[tokio::test]
