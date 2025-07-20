@@ -25,7 +25,3 @@ Delete them immediately - they don't get to hold up development. Fast feedback l
 
 You should keep commits as you make progress. NEVER commit anything that does not pass all above quality checks. Prefer
 not to keep in disabled or nonfunctional tests, it's just noise. 
-
-Whenever you're unsure what to do next, consult the TODO.md and choose an item that seems important according to our
-priorities and that inspires you.
-
