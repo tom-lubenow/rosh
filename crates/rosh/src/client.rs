@@ -108,6 +108,7 @@ pub struct TerminalUI {
     pub state_sync: Arc<RwLock<StateSynchronizer>>,
     pub prediction_enabled: bool,
     stdout: io::Stdout,
+    raw_mode_enabled: bool,
 }
 
 impl TerminalUI {
@@ -122,6 +123,7 @@ impl TerminalUI {
             state_sync,
             prediction_enabled,
             stdout: io::stdout(),
+            raw_mode_enabled: false,
         }
     }
 
@@ -129,6 +131,7 @@ impl TerminalUI {
     fn init(&mut self) -> Result<()> {
         debug!("Initializing terminal in raw mode");
         terminal::enable_raw_mode()?;
+        self.raw_mode_enabled = true;
         execute!(
             self.stdout,
             terminal::Clear(ClearType::All),
@@ -140,7 +143,10 @@ impl TerminalUI {
 
     /// Restore terminal to normal mode
     fn cleanup(&mut self) -> Result<()> {
-        terminal::disable_raw_mode()?;
+        if self.raw_mode_enabled {
+            terminal::disable_raw_mode()?;
+            self.raw_mode_enabled = false;
+        }
         execute!(
             self.stdout,
             terminal::Clear(ClearType::All),
@@ -258,6 +264,20 @@ impl TerminalUI {
             self.terminal.process(input);
         }
         Ok(())
+    }
+}
+
+impl Drop for TerminalUI {
+    fn drop(&mut self) {
+        // Best effort cleanup - ignore errors
+        if self.raw_mode_enabled {
+            let _ = terminal::disable_raw_mode();
+            let _ = execute!(
+                self.stdout,
+                cursor::Show,
+                style::SetAttribute(Attribute::Reset)
+            );
+        }
     }
 }
 

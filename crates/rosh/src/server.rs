@@ -74,7 +74,7 @@ struct Args {
 /// Active session state
 struct Session {
     id: Uuid,
-    pty_session: PtySession,
+    pty_session: Arc<tokio::sync::Mutex<PtySession>>,
     _state_sync: Arc<RwLock<StateSynchronizer>>,
     _client_addr: SocketAddr,
     last_activity: Arc<RwLock<time::Instant>>,
@@ -375,6 +375,9 @@ async fn handle_connection(
     let initial_state = pty_session.get_state().await;
     let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(initial_state, true)));
 
+    // Wrap PTY session in Arc<Mutex>
+    let pty_session = Arc::new(tokio::sync::Mutex::new(pty_session));
+
     // Create session
     let session = Session {
         id: session_id,
@@ -396,17 +399,28 @@ async fn handle_connection(
 
     info!("Client connected successfully from {}", client_addr);
 
-    // Get session reference
+    // Get session reference and start PTY
     let session = server_state
         .get_session(&session_id)
         .await
         .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
+    // Start the PTY session
+    tokio::spawn({
+        let pty_session = session.pty_session.clone();
+        async move {
+            let mut pty_guard = pty_session.lock().await;
+            if let Err(e) = pty_guard.start().await {
+                error!("Failed to start PTY session: {}", e);
+            }
+        }
+    });
+
     // Spawn PTY handler
     let pty_state_sync = state_sync.clone();
     let mut pty_connection = connection.clone();
     let pty_last_activity = session.last_activity.clone();
-    tokio::spawn(async move {
+    let mut pty_handle = tokio::spawn(async move {
         let result: Result<()> = async {
             while let Some(event) = pty_events.recv().await {
                 match event {
@@ -469,17 +483,6 @@ async fn handle_connection(
         }
     });
 
-    // Start PTY session in the session object
-    let session = server_state
-        .get_session(&session_id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
-
-    let mut pty_handle = tokio::spawn(async move {
-        info!("PTY session started for {}", session_id);
-        // PTY session is handled by the event loop
-    });
-
     // Main message loop
     loop {
         tokio::select! {
@@ -492,11 +495,13 @@ async fn handle_connection(
                         match msg {
                             NetworkMessage::Input(data) => {
                                 debug!("Received {} bytes of input", data.len());
-                                session.pty_session.write_input(&data).await?;
+                                let pty_guard = session.pty_session.lock().await;
+                                pty_guard.write_input(&data).await?;
                             }
                             NetworkMessage::Resize(cols, rows) => {
                                 debug!("Resizing terminal to {}x{}", cols, rows);
-                                session.pty_session.resize(rows, cols).await?;
+                                let pty_guard = session.pty_session.lock().await;
+                                pty_guard.resize(rows, cols).await?;
                             }
                             NetworkMessage::StateAck(seq) => {
                                 let mut sync = state_sync.write().await;
@@ -557,7 +562,10 @@ async fn handle_connection(
 
     // Cleanup
     info!("Cleaning up session {}", session_id);
-    session.pty_session.shutdown();
+    {
+        let pty_guard = session.pty_session.lock().await;
+        pty_guard.shutdown();
+    }
     server_state.remove_session(&session_id).await;
 
     Ok(())
