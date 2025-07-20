@@ -89,7 +89,6 @@ struct Session {
     last_activity: Arc<RwLock<time::Instant>>,
 }
 
-
 /// Server state
 struct ServerState {
     sessions: Arc<RwLock<HashMap<Uuid, Arc<Session>>>>,
@@ -227,15 +226,13 @@ fn detach_and_communicate(params: &BootstrapConnectParams) -> Result<()> {
 
 /// Bind to a UDP socket synchronously to find an available port
 fn bind_available_port(addr: SocketAddr) -> Result<(UdpSocket, SocketAddr)> {
-    let socket = UdpSocket::bind(addr)
-        .with_context(|| format!("Failed to bind to {}", addr))?;
-    
+    let socket = UdpSocket::bind(addr).with_context(|| format!("Failed to bind to {addr}"))?;
+
     // Get the actual bound address (important when port is 0)
-    let bound_addr = socket.local_addr()
-        .context("Failed to get local address")?;
-    
+    let bound_addr = socket.local_addr().context("Failed to get local address")?;
+
     info!("Bound UDP socket to {}", bound_addr);
-    
+
     Ok((socket, bound_addr))
 }
 
@@ -271,6 +268,7 @@ async fn run_server(
     bound_addr: SocketAddr,
     session_key: Option<Vec<u8>>,
     _log_file_path: PathBuf,
+    socket: Option<UdpSocket>,
 ) -> Result<()> {
     info!("Starting server main loop on {}", bound_addr);
 
@@ -304,10 +302,17 @@ async fn run_server(
         cert_validation: rosh_network::CertValidationMode::default(),
     };
 
-    // Create network transport using the already-bound address
-    info!("Creating NetworkTransport on {}", bound_addr);
-    let transport =
-        NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config).await?;
+    // Create network transport
+    let transport = if let Some(socket) = socket {
+        info!(
+            "Creating NetworkTransport from existing socket on {}",
+            bound_addr
+        );
+        NetworkTransport::new_server_from_socket(socket, transport_config).await?
+    } else {
+        info!("Creating NetworkTransport on {}", bound_addr);
+        NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config).await?
+    };
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
 
@@ -432,29 +437,30 @@ pub async fn run() -> Result<()> {
             .suffix(".log")
             .tempfile()
             .context("Failed to create temporary log file")?;
-        
+
         // Get the path and keep the file from being deleted
-        let (_, path) = temp_file.keep()
+        let (_, path) = temp_file
+            .keep()
             .map_err(|e| anyhow::anyhow!("Failed to persist temp log file: {}", e))?;
         path
     };
-    
+
     // Print log file path to stdout for the client to capture
     println!("SERVER_LOG_FILE: {}", log_file_path.display());
-    
+
     // Open log file for writing
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log_file_path)
         .with_context(|| format!("Failed to open log file: {}", log_file_path.display()))?;
-    
+
     // Force log_level to at least INFO for debugging
     let effective_log_level = match log_level {
         tracing::Level::ERROR => tracing::Level::INFO,
         other => other,
     };
-    
+
     // Use file writer for logging
     if args.one_shot {
         tracing_subscriber::fmt()
@@ -473,9 +479,12 @@ pub async fn run() -> Result<()> {
             .with_ansi(false)
             .init();
     }
-    
+
     // Log initial startup message
-    info!("Rosh server starting up, log file: {}", log_file_path.display());
+    info!(
+        "Rosh server starting up, log file: {}",
+        log_file_path.display()
+    );
     info!("Server args: {:?}", args);
 
     // Generate session key for one-shot mode
@@ -493,15 +502,13 @@ pub async fn run() -> Result<()> {
     }
 
     // Bind port synchronously BEFORE forking (like mosh does)
-    let bound_addr = if args.detach && args.one_shot {
+    let (socket, bound_addr) = if args.detach && args.one_shot {
         // For detach mode, bind synchronously before forking
-        let (_socket, addr) = bind_available_port(args.bind)?;
-        // Close the socket immediately - we'll recreate it after forking
-        drop(_socket);
-        addr
+        let (socket, addr) = bind_available_port(args.bind)?;
+        (Some(socket), addr)
     } else {
         // For non-detach mode, we'll let NetworkTransport handle binding
-        args.bind
+        (None, args.bind)
     };
 
     // Prepare connection parameters if in one-shot mode
@@ -510,11 +517,29 @@ pub async fn run() -> Result<()> {
         let encoded_key =
             base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
 
+        // Determine the IP to report to the client
+        let reported_ip = if let Ok(ssh_conn) = std::env::var("SSH_CONNECTION") {
+            // We're in an SSH session
+            let parts: Vec<&str> = ssh_conn.split_whitespace().collect();
+            if parts.len() >= 4 {
+                // Always use localhost for SSH connections (like mosh does)
+                "localhost".to_string()
+            } else {
+                // Fallback to bound address
+                bound_addr.ip().to_string()
+            }
+        } else {
+            // Not in SSH session, use bound address
+            bound_addr.ip().to_string()
+        };
+
         Some(BootstrapConnectParams {
-            ip: bound_addr.ip().to_string(),
+            ip: reported_ip,
             port: bound_addr.port(),
             session_key: encoded_key,
             log_file: Some(log_file_path.display().to_string()),
+            client_addr: None,
+            needs_hole_punch: false,
         })
     } else {
         None
@@ -538,7 +563,7 @@ pub async fn run() -> Result<()> {
     info!("Detach complete, continuing server initialization");
 
     // Now run the actual server with the bound address
-    run_server(args, bound_addr, session_key, log_file_path).await
+    run_server(args, bound_addr, session_key, log_file_path, socket).await
 }
 
 async fn handle_connection(

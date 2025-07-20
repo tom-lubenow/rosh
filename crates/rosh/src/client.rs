@@ -1,8 +1,6 @@
 //! Rosh client implementation
 
-use crate::bootstrap::{
-    bootstrap_via_ssh, BootstrapConnectParams, BootstrapOptions, NetworkFamily, RemoteIpStrategy,
-};
+use crate::bootstrap::{bootstrap_via_ssh, BootstrapOptions, NetworkFamily, RemoteIpStrategy};
 use crate::terminal_guard::TerminalGuard;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
@@ -293,7 +291,7 @@ async fn retrieve_server_logs(host: &str, log_path: &str) {
     cmd.arg("-n"); // No stdin
     cmd.arg("-T"); // No PTY
     cmd.arg(host);
-    cmd.arg(format!("cat {}", log_path));
+    cmd.arg(format!("cat {log_path}"));
 
     match cmd.output().await {
         Ok(output) => {
@@ -390,7 +388,7 @@ pub async fn run() -> Result<()> {
             user.as_deref().unwrap_or("<default>"),
             host
         );
-        let bootstrap_info = bootstrap_via_ssh(BootstrapOptions {
+        let connect_params = bootstrap_via_ssh(BootstrapOptions {
             user: user.as_deref(),
             host: &host,
             ssh_port: args.ssh_port,
@@ -404,8 +402,7 @@ pub async fn run() -> Result<()> {
         })
         .await?;
 
-        // Convert to connection params and log
-        let connect_params: BootstrapConnectParams = bootstrap_info.into();
+        // Log connection parameters
         info!(
             "Bootstrap complete. Connection parameters: {}",
             serde_json::to_string(&connect_params).unwrap_or_else(|_| "<error>".to_string())
@@ -413,6 +410,15 @@ pub async fn run() -> Result<()> {
 
         let server_addr = SocketAddr::new(connect_params.ip.parse()?, connect_params.port);
         let log_file = connect_params.log_file.clone();
+
+        // Give the server a moment to complete its setup after detaching
+        // This is necessary because the server needs to:
+        // 1. Complete the double-fork detach process
+        // 2. Create the NetworkTransport and bind to the port
+        // 3. Start accepting connections
+        info!("Waiting for server to complete initialization...");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
         (server_addr, connect_params.session_key, log_file)
     } else {
         // Direct connection
@@ -463,7 +469,10 @@ pub async fn run() -> Result<()> {
 
     // Connect to server
     debug!("Creating QUIC network transport");
+
+    // Create transport
     let mut transport = NetworkTransport::new_client(transport_config).await?;
+
     info!("Establishing QUIC connection to {}", server_addr);
     let mut connection =
         match time::timeout(Duration::from_secs(5), transport.connect(server_addr)).await {

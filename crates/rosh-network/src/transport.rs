@@ -16,7 +16,7 @@ use quinn::{
 };
 use rosh_crypto::{create_cipher, CipherAlgorithm};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +47,32 @@ impl NetworkTransport {
         config: RoshTransportConfig,
     ) -> Result<ServerTransportWrapper, NetworkError> {
         let transport = ServerTransport::new(bind_addr, config).await?;
+        Ok(ServerTransportWrapper {
+            transport,
+            key: None,
+            algorithm: None,
+        })
+    }
+
+    /// Create a new client transport from an existing socket (e.g., after hole punching)
+    pub async fn new_client_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<ClientTransportWrapper, NetworkError> {
+        let transport = ClientTransport::new_from_socket(socket, config).await?;
+        Ok(ClientTransportWrapper {
+            transport,
+            key: None,
+            algorithm: None,
+        })
+    }
+
+    /// Create a new server transport from an existing socket (e.g., after hole punching)
+    pub async fn new_server_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<ServerTransportWrapper, NetworkError> {
+        let transport = ServerTransport::new_from_socket(socket, config).await?;
         Ok(ServerTransportWrapper {
             transport,
             key: None,
@@ -99,6 +125,38 @@ impl ClientTransport {
             .map_err(|e| NetworkError::TransportError(format!("Failed to parse address: {e}")))?;
         let endpoint = Endpoint::client(addr)
             .map_err(|e| NetworkError::TransportError(format!("Failed to create endpoint: {e}")))?;
+
+        Ok(Self {
+            endpoint,
+            connection: None,
+        })
+    }
+
+    /// Create a new client transport from an existing socket
+    pub async fn new_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<Self, NetworkError> {
+        let client_config = create_client_config(config.clone())?;
+        let endpoint_config = quinn::EndpointConfig::default();
+
+        // Get the default runtime
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| NetworkError::TransportError("No async runtime found".to_string()))?;
+
+        let endpoint = Endpoint::new(
+            endpoint_config,
+            None, // No server config for client
+            socket,
+            runtime,
+        )
+        .map_err(|e| {
+            NetworkError::TransportError(format!("Failed to create endpoint from socket: {e}"))
+        })?;
+
+        // Set the default client config
+        let mut endpoint = endpoint;
+        endpoint.set_default_client_config(client_config);
 
         Ok(Self {
             endpoint,
@@ -166,6 +224,26 @@ impl ServerTransport {
         let endpoint = Endpoint::server(server_config, bind_addr).map_err(|e| {
             NetworkError::TransportError(format!("Failed to create server endpoint: {e}"))
         })?;
+
+        Ok(Self { endpoint })
+    }
+
+    /// Create a new server transport from an existing socket
+    pub async fn new_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<Self, NetworkError> {
+        let (server_config, _) = create_server_config(config)?;
+        let endpoint_config = quinn::EndpointConfig::default();
+
+        // Get the default runtime
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| NetworkError::TransportError("No async runtime found".to_string()))?;
+
+        let endpoint = Endpoint::new(endpoint_config, Some(server_config), socket, runtime)
+            .map_err(|e| {
+                NetworkError::TransportError(format!("Failed to create endpoint from socket: {e}"))
+            })?;
 
         Ok(Self { endpoint })
     }
