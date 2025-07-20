@@ -346,7 +346,7 @@ fn build_remote_command(options: &BootstrapOptions<'_>) -> String {
         "--one-shot".to_string(),
         "--timeout".to_string(),
         "60".to_string(),
-        "--detach".to_string(), // Ignore SIGHUP so server survives SSH disconnect
+        "--detach".to_string(), // Properly detach as daemon after printing params
     ];
 
     // Add cipher option
@@ -428,7 +428,7 @@ async fn execute_ssh_command(mut cmd: Command) -> Result<String> {
         }
     }
 
-    // Kill SSH process
+    // Kill SSH process - the server has already detached
     let _ = child.kill().await;
 
     if output.is_empty() {

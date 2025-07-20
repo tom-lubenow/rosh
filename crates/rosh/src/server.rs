@@ -71,7 +71,7 @@ struct Args {
     #[arg(long, default_value = "0")]
     timeout: u64,
 
-    /// Ignore SIGHUP to survive SSH disconnect (for SSH bootstrap)
+    /// Detach from parent process and become a daemon (for SSH bootstrap)
     #[arg(long)]
     detach: bool,
 }
@@ -119,25 +119,103 @@ impl ServerState {
     }
 }
 
-/// Ignore SIGHUP to survive SSH disconnect
-fn ignore_sighup() -> Result<()> {
+/// Properly detach from parent process using double-fork and pipe communication
+fn detach_and_communicate(params: &BootstrapConnectParams) -> Result<()> {
     #[cfg(unix)]
     {
-        unsafe {
-            // Set SIGHUP to be ignored
-            if libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR {
-                anyhow::bail!(
-                    "Failed to ignore SIGHUP: {}",
-                    std::io::Error::last_os_error()
-                );
+        use std::io::{Read, Write};
+        use std::os::unix::io::FromRawFd;
+
+        // Create pipe for communication
+        let mut fds = [0; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
+            anyhow::bail!("Failed to create pipe: {}", std::io::Error::last_os_error());
+        }
+        let (read_fd, write_fd) = (fds[0], fds[1]);
+
+        match unsafe { libc::fork() } {
+            -1 => anyhow::bail!("Failed to fork: {}", std::io::Error::last_os_error()),
+            0 => {
+                // Child process
+                unsafe {
+                    libc::close(read_fd);
+                }
+
+                // Write connection params to parent through pipe
+                let json = serde_json::to_string(params)?;
+                let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+                write_file.write_all(json.as_bytes())?;
+                write_file.flush()?;
+                std::mem::forget(write_file); // Don't close the fd twice
+                unsafe {
+                    libc::close(write_fd);
+                }
+
+                // Create new session
+                if unsafe { libc::setsid() } == -1 {
+                    eprintln!(
+                        "Failed to create new session: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    std::process::exit(1);
+                }
+
+                // Second fork to ensure we can't acquire a controlling terminal
+                match unsafe { libc::fork() } {
+                    -1 => {
+                        eprintln!(
+                            "Failed to fork second time: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        std::process::exit(1);
+                    }
+                    0 => {
+                        // Grandchild - the actual daemon
+                        // Continue execution
+                        Ok(())
+                    }
+                    _ => {
+                        // First child exits
+                        std::process::exit(0);
+                    }
+                }
+            }
+            child_pid => {
+                // Parent process
+                unsafe {
+                    libc::close(write_fd);
+                }
+
+                // Read connection params from pipe
+                let mut read_file = unsafe { std::fs::File::from_raw_fd(read_fd) };
+                let mut buffer = String::new();
+                read_file.read_to_string(&mut buffer)?;
+                std::mem::forget(read_file); // Don't close the fd twice
+                unsafe {
+                    libc::close(read_fd);
+                }
+
+                // Wait for first child to exit
+                let mut status = 0;
+                unsafe {
+                    libc::waitpid(child_pid, &mut status, 0);
+                }
+
+                // Print the params for SSH to capture
+                println!("ROSH_CONNECT_PARAMS: {buffer}");
+                std::io::stdout().flush()?;
+
+                // Parent exits
+                std::process::exit(0);
             }
         }
-        Ok(())
     }
 
     #[cfg(not(unix))]
     {
-        // On non-Unix platforms, there's no SIGHUP
+        // On non-Unix platforms, just print the params
+        println!("ROSH_CONNECT_PARAMS: {}", serde_json::to_string(params)?);
+        std::io::stdout().flush()?;
         Ok(())
     }
 }
@@ -250,26 +328,32 @@ pub async fn run() -> Result<()> {
     // Get actual bound address (in case port was 0)
     let bound_addr = transport.local_addr()?;
 
-    // Output connection info for one-shot mode
-    if args.one_shot {
+    // Prepare connection parameters if in one-shot mode
+    let params = if args.one_shot {
         use base64::Engine;
         let encoded_key =
             base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
 
-        let params = BootstrapConnectParams {
+        Some(BootstrapConnectParams {
             ip: bound_addr.ip().to_string(),
             port: bound_addr.port(),
             session_key: encoded_key,
-        };
+        })
+    } else {
+        None
+    };
 
-        // Output as JSON on a single line
+    // Detach if requested (which also outputs connection params)
+    if args.detach {
+        if let Some(params) = params {
+            detach_and_communicate(&params)?;
+        } else {
+            anyhow::bail!("Detach requires one-shot mode");
+        }
+    } else if let Some(params) = params {
+        // Not detaching, just print params normally
         println!("ROSH_CONNECT_PARAMS: {}", serde_json::to_string(&params)?);
         std::io::stdout().flush()?;
-    }
-
-    // Ignore SIGHUP if detach is requested so we survive SSH disconnect
-    if args.detach {
-        ignore_sighup()?;
     }
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
