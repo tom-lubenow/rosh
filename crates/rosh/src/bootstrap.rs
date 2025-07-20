@@ -49,6 +49,27 @@ pub struct BootstrapInfo {
     pub session_key: String,
 }
 
+/// Connection parameters for establishing a Rosh connection
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct BootstrapConnectParams {
+    /// Server IP address
+    pub ip: String,
+    /// Server port (QUIC/Rosh port, not SSH port)
+    pub port: u16,
+    /// Session key (base64 encoded)
+    pub session_key: String,
+}
+
+impl From<BootstrapInfo> for BootstrapConnectParams {
+    fn from(info: BootstrapInfo) -> Self {
+        Self {
+            ip: info.ip.to_string(),
+            port: info.port,
+            session_key: info.session_key,
+        }
+    }
+}
+
 /// Options for bootstrapping a connection via SSH
 pub struct BootstrapOptions<'a> {
     /// User (if specified)
@@ -103,6 +124,16 @@ impl NetworkFamily {
 
 /// Bootstrap a Rosh connection via SSH
 pub async fn bootstrap_via_ssh(options: BootstrapOptions<'_>) -> Result<BootstrapInfo> {
+    info!(
+        "Starting SSH bootstrap to {} using {} IP resolution strategy",
+        options.host,
+        match options.remote_ip_strategy {
+            RemoteIpStrategy::Local => "local",
+            RemoteIpStrategy::Remote => "remote",
+            RemoteIpStrategy::Proxy => "proxy",
+        }
+    );
+
     match options.remote_ip_strategy {
         RemoteIpStrategy::Local => bootstrap_local_resolution(options).await,
         RemoteIpStrategy::Remote => bootstrap_remote_resolution(options).await,
@@ -125,7 +156,9 @@ async fn bootstrap_local_resolution(options: BootstrapOptions<'_>) -> Result<Boo
     };
 
     // Start server via SSH using resolved IP
+    info!("Starting Rosh server via SSH on resolved IP: {}", ip);
     let (port, session_key) = start_server_ssh(&ssh_target, &options).await?;
+    info!("Server started on port {} with session key", port);
 
     Ok(BootstrapInfo {
         ip,
@@ -146,7 +179,9 @@ async fn bootstrap_remote_resolution(options: BootstrapOptions<'_>) -> Result<Bo
     };
 
     // Start server via SSH with SSH_CONNECTION capture
+    info!("Starting Rosh server via SSH and capturing SSH_CONNECTION");
     let (ip, port, session_key) = start_server_ssh_with_connection(&ssh_target, &options).await?;
+    info!("Server started on {}:{} with session key", ip, port);
 
     Ok(BootstrapInfo {
         ip,
@@ -261,7 +296,7 @@ fn build_ssh_command(
 
     // Basic SSH options
     cmd.arg("-n"); // No stdin
-    cmd.arg("-tt"); // Allocate PTY
+    cmd.arg("-T"); // No PTY allocation to avoid terminal escape sequences
 
     // Only set port if explicitly specified
     // This allows SSH config to take precedence for hosts defined there
@@ -311,6 +346,7 @@ fn build_remote_command(options: &BootstrapOptions<'_>) -> String {
         "--one-shot".to_string(),
         "--timeout".to_string(),
         "60".to_string(),
+        "--detach".to_string(), // Ignore SIGHUP so server survives SSH disconnect
     ];
 
     // Add cipher option
@@ -341,103 +377,89 @@ fn build_remote_command(options: &BootstrapOptions<'_>) -> String {
 
 /// Execute SSH command and collect output
 async fn execute_ssh_command(mut cmd: Command) -> Result<String> {
+    debug!("Executing SSH command to start remote server");
     let mut child = cmd.spawn().context("Failed to spawn SSH process")?;
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow::anyhow!("Failed to get stdout from SSH"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get stderr from SSH"))?;
 
     let mut stdout_reader = BufReader::new(stdout);
-    let mut stderr_reader = BufReader::new(stderr);
     let mut output = String::new();
 
     let timeout = Duration::from_secs(10);
     let start = std::time::Instant::now();
 
-    loop {
-        if start.elapsed() > timeout {
-            anyhow::bail!("Timeout waiting for server to start");
-        }
-
-        let mut stdout_line = String::new();
-        let mut stderr_line = String::new();
-
-        tokio::select! {
-            result = stdout_reader.read_line(&mut stdout_line) => {
-                if result? == 0 {
-                    break; // EOF
-                }
-                output.push_str(&stdout_line);
-                debug!("SSH stdout: {}", stdout_line.trim());
-            }
-
-            result = stderr_reader.read_line(&mut stderr_line) => {
-                if result? > 0 {
-                    output.push_str(&stderr_line);
-                    debug!("SSH stderr: {}", stderr_line.trim());
-                }
-            }
-
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Check if we have the required output
-                if output.contains("ROSH_PORT=") && output.contains("ROSH_KEY=") {
+    // Read until we get the required output or timeout
+    while start.elapsed() < timeout {
+        let mut line = String::new();
+        match tokio::time::timeout(
+            Duration::from_millis(100),
+            stdout_reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) => break, // EOF
+            Ok(Ok(_)) => {
+                output.push_str(&line);
+                // Check if we have all required output
+                if output.contains("ROSH_CONNECT_PARAMS:") {
+                    // Give a brief moment for any remaining output
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    // Read any remaining lines without blocking
+                    while let Ok(Ok(n)) = tokio::time::timeout(
+                        Duration::from_millis(10),
+                        stdout_reader.read_line(&mut line),
+                    )
+                    .await
+                    {
+                        if n == 0 {
+                            break;
+                        }
+                        output.push_str(&line);
+                        line.clear();
+                    }
                     break;
                 }
             }
+            Ok(Err(e)) => return Err(e).context("Failed to read SSH output"),
+            Err(_) => continue, // Timeout on read, continue
         }
     }
 
     // Kill SSH process
     let _ = child.kill().await;
 
-    // Log the full output for debugging
     if output.is_empty() {
-        warn!("SSH command produced no output");
-    } else {
-        debug!("Full SSH output:\n{}", output);
+        anyhow::bail!("SSH command produced no output");
     }
 
     Ok(output)
 }
 
-/// Parse server output for port and session key
+/// Parse server output for connection parameters
 fn parse_server_output(output: &str) -> Result<(u16, String)> {
-    let mut port = None;
-    let mut session_key = None;
+    debug!("Parsing server output for connection parameters");
 
+    // Look for the JSON connection params
     for line in output.lines() {
         let line = line.trim();
-        if line.starts_with("ROSH_PORT=") {
-            port = Some(
-                line.strip_prefix("ROSH_PORT=")
-                    .unwrap()
-                    .parse::<u16>()
-                    .context("Failed to parse port")?,
-            );
-        } else if line.starts_with("ROSH_KEY=") {
-            session_key = Some(line.strip_prefix("ROSH_KEY=").unwrap().to_string());
+        if line.starts_with("ROSH_CONNECT_PARAMS: ") {
+            let json_str = line.strip_prefix("ROSH_CONNECT_PARAMS: ").unwrap();
+            debug!("Found connection params JSON: {}", json_str);
+
+            let params: BootstrapConnectParams = serde_json::from_str(json_str)
+                .context("Failed to parse connection parameters JSON")?;
+
+            return Ok((params.port, params.session_key));
         }
     }
 
-    let port = port.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Server did not provide port. Output was:\n{}",
-            output.lines().take(20).collect::<Vec<_>>().join("\n")
-        )
-    })?;
-    let session_key = session_key.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Server did not provide session key. Output was:\n{}",
-            output.lines().take(20).collect::<Vec<_>>().join("\n")
-        )
-    })?;
-
-    Ok((port, session_key))
+    anyhow::bail!(
+        "Server did not provide connection parameters. Output was:\n{}",
+        output.lines().take(20).collect::<Vec<_>>().join("\n")
+    )
 }
 
 /// Parse SSH_CONNECTION to extract server IP

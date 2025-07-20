@@ -1,5 +1,6 @@
 //! Rosh server implementation
 
+use crate::bootstrap::BootstrapConnectParams;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rkyv::Deserialize;
@@ -69,6 +70,10 @@ struct Args {
     /// Timeout in seconds for one-shot mode (0 = no timeout)
     #[arg(long, default_value = "0")]
     timeout: u64,
+
+    /// Ignore SIGHUP to survive SSH disconnect (for SSH bootstrap)
+    #[arg(long)]
+    detach: bool,
 }
 
 /// Active session state
@@ -111,6 +116,29 @@ impl ServerState {
     async fn get_session(&self, id: &Uuid) -> Option<Arc<Session>> {
         let sessions = self.sessions.read().await;
         sessions.get(id).cloned()
+    }
+}
+
+/// Ignore SIGHUP to survive SSH disconnect
+fn ignore_sighup() -> Result<()> {
+    #[cfg(unix)]
+    {
+        unsafe {
+            // Set SIGHUP to be ignored
+            if libc::signal(libc::SIGHUP, libc::SIG_IGN) == libc::SIG_ERR {
+                anyhow::bail!(
+                    "Failed to ignore SIGHUP: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, there's no SIGHUP
+        Ok(())
     }
 }
 
@@ -227,9 +255,21 @@ pub async fn run() -> Result<()> {
         use base64::Engine;
         let encoded_key =
             base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
-        println!("ROSH_PORT={}", bound_addr.port());
-        println!("ROSH_KEY={encoded_key}");
+
+        let params = BootstrapConnectParams {
+            ip: bound_addr.ip().to_string(),
+            port: bound_addr.port(),
+            session_key: encoded_key,
+        };
+
+        // Output as JSON on a single line
+        println!("ROSH_CONNECT_PARAMS: {}", serde_json::to_string(&params)?);
         std::io::stdout().flush()?;
+    }
+
+    // Ignore SIGHUP if detach is requested so we survive SSH disconnect
+    if args.detach {
+        ignore_sighup()?;
     }
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));

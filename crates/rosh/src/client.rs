@@ -1,6 +1,9 @@
 //! Rosh client implementation
 
-use crate::bootstrap::{bootstrap_via_ssh, BootstrapOptions, NetworkFamily, RemoteIpStrategy};
+use crate::bootstrap::{
+    bootstrap_via_ssh, BootstrapConnectParams, BootstrapOptions, NetworkFamily, RemoteIpStrategy,
+};
+use crate::terminal_guard::TerminalGuard;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use crossterm::{
@@ -108,7 +111,7 @@ pub struct TerminalUI {
     pub state_sync: Arc<RwLock<StateSynchronizer>>,
     pub prediction_enabled: bool,
     stdout: io::Stdout,
-    raw_mode_enabled: bool,
+    terminal_guard: Option<TerminalGuard>,
 }
 
 impl TerminalUI {
@@ -123,15 +126,17 @@ impl TerminalUI {
             state_sync,
             prediction_enabled,
             stdout: io::stdout(),
-            raw_mode_enabled: false,
+            terminal_guard: None,
         }
     }
 
-    /// Initialize terminal for raw mode
+    /// Initialize terminal for raw mode, taking ownership of terminal and disabling logging
     fn init(&mut self) -> Result<()> {
-        debug!("Initializing terminal in raw mode");
-        terminal::enable_raw_mode()?;
-        self.raw_mode_enabled = true;
+        // Acquire terminal guard, which disables all logging
+        let mut guard = TerminalGuard::acquire()?;
+        guard.enable_raw_mode()?;
+        self.terminal_guard = Some(guard);
+
         execute!(
             self.stdout,
             terminal::Clear(ClearType::All),
@@ -143,9 +148,8 @@ impl TerminalUI {
 
     /// Restore terminal to normal mode
     fn cleanup(&mut self) -> Result<()> {
-        if self.raw_mode_enabled {
-            terminal::disable_raw_mode()?;
-            self.raw_mode_enabled = false;
+        if let Some(mut guard) = self.terminal_guard.take() {
+            guard.disable_raw_mode()?;
         }
         execute!(
             self.stdout,
@@ -269,9 +273,8 @@ impl TerminalUI {
 
 impl Drop for TerminalUI {
     fn drop(&mut self) {
-        // Best effort cleanup - ignore errors
-        if self.raw_mode_enabled {
-            let _ = terminal::disable_raw_mode();
+        // The terminal guard will handle cleanup when dropped
+        if self.terminal_guard.is_some() {
             let _ = execute!(
                 self.stdout,
                 cursor::Show,
@@ -301,6 +304,10 @@ pub fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
 pub async fn run() -> Result<()> {
     let args = Args::parse();
 
+    // Ensure terminal is in a clean state before we start
+    // This helps if a previous run left the terminal in raw mode
+    let _ = terminal::disable_raw_mode();
+
     // Initialize logging
     let log_level = if args.debug {
         tracing::Level::DEBUG
@@ -317,6 +324,9 @@ pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_writer(io::stderr)
+        .with_line_number(false)
+        .with_file(false)
+        .with_target(false)
         .init();
 
     // Parse server argument
@@ -341,6 +351,11 @@ pub async fn run() -> Result<()> {
             anyhow::bail!("Cannot specify --key with SSH connection");
         }
 
+        info!(
+            "Bootstrapping Rosh connection via SSH to {}@{}",
+            user.as_deref().unwrap_or("<default>"),
+            host
+        );
         let bootstrap_info = bootstrap_via_ssh(BootstrapOptions {
             user: user.as_deref(),
             host: &host,
@@ -355,8 +370,15 @@ pub async fn run() -> Result<()> {
         })
         .await?;
 
-        let server_addr = SocketAddr::new(bootstrap_info.ip, bootstrap_info.port);
-        (server_addr, bootstrap_info.session_key)
+        // Convert to connection params and log
+        let connect_params: BootstrapConnectParams = bootstrap_info.into();
+        info!(
+            "Bootstrap complete. Connection parameters: {}",
+            serde_json::to_string(&connect_params).unwrap_or_else(|_| "<error>".to_string())
+        );
+
+        let server_addr = SocketAddr::new(connect_params.ip.parse()?, connect_params.port);
+        (server_addr, connect_params.session_key)
     } else {
         // Direct connection
         let session_key = args
@@ -368,10 +390,11 @@ pub async fn run() -> Result<()> {
             .parse()
             .with_context(|| format!("Failed to parse server address: {}", args.server))?;
 
+        info!("Using direct connection to {}", server_addr);
         (server_addr, session_key)
     };
 
-    info!("Connecting to Rosh server at {}", server_addr);
+    info!("Connecting to Rosh server via QUIC at {}", server_addr);
 
     // Decode session key
     use base64::Engine;
@@ -404,17 +427,17 @@ pub async fn run() -> Result<()> {
     };
 
     // Connect to server
-    debug!("Creating network transport");
+    debug!("Creating QUIC network transport");
     let mut transport = NetworkTransport::new_client(transport_config).await?;
-    debug!("Connecting to server at {}", server_addr);
+    info!("Establishing QUIC connection to {}", server_addr);
     let mut connection =
         match time::timeout(Duration::from_secs(5), transport.connect(server_addr)).await {
             Ok(Ok(conn)) => {
-                debug!("Connected successfully");
+                info!("QUIC connection established successfully");
                 conn
             }
-            Ok(Err(e)) => anyhow::bail!("Failed to connect to server: {}", e),
-            Err(_) => anyhow::bail!("Connection timeout after 5 seconds"),
+            Ok(Err(e)) => anyhow::bail!("Failed to connect to Rosh server: {}", e),
+            Err(_) => anyhow::bail!("QUIC connection timeout after 5 seconds"),
         };
 
     // Send handshake
@@ -471,16 +494,11 @@ pub async fn run() -> Result<()> {
     // Create state synchronizer
     let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(initial_state, false)));
 
-    // Create terminal UI
-    debug!("Creating terminal UI");
-    let mut ui = TerminalUI::new(cols, rows, state_sync.clone(), args.predict);
-    ui.init()?;
-
     // Create channels
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
-    // Send command if provided
+    // Send command if provided (before entering raw mode)
     if let Some(cmd) = &args.command {
         debug!("Sending command: {}", cmd);
         // Send the command followed by newline
@@ -497,6 +515,11 @@ pub async fn run() -> Result<()> {
             .send(NetworkMessage::Input(b"exit\n".to_vec()))
             .await?;
     }
+
+    // Now that all debug logging is done, create and initialize terminal UI
+    info!("Bootstrap complete, switching to terminal mode");
+    let mut ui = TerminalUI::new(cols, rows, state_sync.clone(), args.predict);
+    ui.init()?; // This disables logging and enables raw mode
 
     // Spawn input handler (only if no command provided)
     let input_handle = if args.command.is_none() {
