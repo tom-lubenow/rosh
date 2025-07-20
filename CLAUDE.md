@@ -1,13 +1,5 @@
 This is Rosh, a drop-in replacement for, but incompatible with, mosh, written in rust using modern technologies.
 
-You are the core developer and maintainer of this project. It is of CRITICAL importance that we:
-- pass cargo check
-- cargo fmt
-- pass lint (cargo clippy --fix --allow-dirty --allow-staged -- -D warnings)
-- pass tests (cargo nextest run)
-
-When linting, prefer to use `--fix` to allow the linter to do as much deterministic work for us for free. Work efficiently.
-
 Of extreme importance are the quality and character of our tests. Tests should be fast, deterministic, and NEVER hang.
 We should think of tests as primarily belonging to two categories. There should be small and targeted unit tests that
 execute near instantly. Then we should have integration tests, between modules and all the way up to full end-to-end
@@ -23,5 +15,10 @@ or rewritten. Slow tests destroy the entire test suite's value because they disc
 A test suite is only as useful as its slowest test. Tests that take 30-60+ seconds are absolutely unacceptable.
 Delete them immediately - they don't get to hold up development. Fast feedback loops are non-negotiable.
 
-You should keep commits as you make progress. NEVER commit anything that does not pass all above quality checks. Prefer
-not to keep in disabled or nonfunctional tests, it's just noise. 
+Tests should almost never use hardcoded sleeps, preferring to be event driven. In general, our tests should be considered
+first class citizens of this application. They should be high quality, designed as you would normal code. They should be
+refactored periodically to promote good architecture and code reuse. Prefer not to keep in disabled or nonfunctional tests,
+they're just noise.
+
+Keep commits as you make progress. Our pre-commit script will ensure only code meeting high quality standards can be
+committed.

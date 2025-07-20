@@ -106,6 +106,10 @@
                 rust-analyzer
                 crate2nix.packages.${system}.default
 
+                # Python and pre-commit
+                python313
+                pre-commit
+
                 # Platform-specific dependencies
               ]
               ++ platformDeps;
