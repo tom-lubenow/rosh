@@ -357,37 +357,55 @@ async fn run_fake_proxy(host: &str, port: &str, family: NetworkFamily) -> Result
         anyhow::bail!("No addresses found for {}", host);
     }
 
-    // Select address based on family preference
-    let addr = match family {
-        NetworkFamily::Inet => addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| addrs.first())
-            .unwrap(),
-        NetworkFamily::Inet6 => addrs
-            .iter()
-            .find(|a| a.is_ipv6())
-            .or_else(|| addrs.first())
-            .unwrap(),
-        NetworkFamily::PreferInet => addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| addrs.first())
-            .unwrap(),
-        NetworkFamily::PreferInet6 => addrs
-            .iter()
-            .find(|a| a.is_ipv6())
-            .or_else(|| addrs.first())
-            .unwrap(),
-        NetworkFamily::All => addrs.first().unwrap(),
+    // Try to connect to each address until one succeeds (like mosh)
+    let mut last_err = None;
+    let mut connected_stream = None;
+    let mut connected_addr = None;
+
+    for addr in &addrs {
+        // Filter by family preference
+        match family {
+            NetworkFamily::Inet if !addr.is_ipv4() => continue,
+            NetworkFamily::Inet6 if !addr.is_ipv6() => continue,
+            NetworkFamily::PreferInet => {
+                // Try IPv4 first
+                if !addr.is_ipv4() && addrs.iter().any(|a| a.is_ipv4()) {
+                    continue;
+                }
+            }
+            NetworkFamily::PreferInet6 => {
+                // Try IPv6 first
+                if !addr.is_ipv6() && addrs.iter().any(|a| a.is_ipv6()) {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        match TcpStream::connect(addr) {
+            Ok(stream) => {
+                connected_stream = Some(stream);
+                connected_addr = Some(*addr);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+
+    let (mut stream, addr) = match (connected_stream, connected_addr) {
+        (Some(s), Some(a)) => (s, a),
+        _ => {
+            let err_msg = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "No suitable address found".to_string());
+            anyhow::bail!("Could not connect to {}: {}", host, err_msg);
+        }
     };
 
-    // Print the resolved IP to stderr for the parent process
+    // Print the resolved and connected IP to stderr for the parent process
     eprintln!("ROSH IP {}", addr.ip());
-
-    // Connect to the target
-    let mut stream =
-        TcpStream::connect(addr).with_context(|| format!("Failed to connect to {addr}"))?;
 
     // Set up non-blocking I/O
     stream.set_nonblocking(true)?;
@@ -460,7 +478,7 @@ pub async fn run() -> Result<()> {
         } else if args.ipv6 {
             NetworkFamily::Inet6
         } else {
-            NetworkFamily::from_str(&args.family)?
+            NetworkFamily::parse(&args.family)?
         };
 
         return run_fake_proxy(host, port, family).await;
@@ -500,11 +518,11 @@ pub async fn run() -> Result<()> {
     } else if args.ipv6 {
         NetworkFamily::Inet6
     } else {
-        NetworkFamily::from_str(&args.family)?
+        NetworkFamily::parse(&args.family)?
     };
 
     // Parse remote IP strategy
-    let remote_ip_strategy = RemoteIpStrategy::from_str(&args.experimental_remote_ip)?;
+    let remote_ip_strategy = RemoteIpStrategy::parse(&args.experimental_remote_ip)?;
 
     // Get connection info
     let (server_addr, session_key_str, log_file) = if is_ssh {
@@ -575,15 +593,12 @@ pub async fn run() -> Result<()> {
         .decode(&session_key_str)
         .context("Failed to decode session key")?;
 
-    // Perform UDP hole punching (only for SSH connections)
-    // This serves two purposes:
-    // 1. Punches through NAT/firewalls like mosh does
-    // 2. Confirms the server is ready before attempting QUIC connection
+    // Skip hole punching - QUIC handles NAT traversal through its own mechanisms
+    // The initial QUIC handshake packets will punch through NAT naturally
     if is_ssh {
-        info!("Performing UDP hole punch and server readiness check...");
-        crate::hole_punch::client_hole_punch(server_addr, &key_bytes)
-            .await
-            .context("UDP hole punch failed - server may not be ready or UDP is blocked")?;
+        info!("Skipping explicit UDP hole punch - QUIC will handle NAT traversal");
+        // Give server a moment to fully initialize after detaching
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // Derive session keys

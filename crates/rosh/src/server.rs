@@ -123,6 +123,47 @@ impl ServerState {
     }
 }
 
+/// Run the server after forking has already happened
+async fn run_server_after_fork(
+    args: Args,
+    bound_addr: SocketAddr,
+    session_key: Option<Vec<u8>>,
+    log_file_path: PathBuf,
+    socket: Option<std::net::UdpSocket>,
+) -> Result<()> {
+    // Debug output to stderr before logging is set up
+    eprintln!("DEBUG: run_server_after_fork called");
+    eprintln!("DEBUG: bound_addr = {bound_addr}");
+    eprintln!("DEBUG: log_file_path = {}", log_file_path.display());
+
+    // Set up logging
+    let log_level = tracing::Level::INFO;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .with_context(|| format!("Failed to open log file: {}", log_file_path.display()))?;
+
+    eprintln!("DEBUG: Log file opened successfully");
+
+    tracing_subscriber::fmt()
+        .with_max_level(log_level)
+        .with_writer(log_file)
+        .with_ansi(false)
+        .init();
+
+    eprintln!("DEBUG: Logging initialized");
+
+    info!(
+        "Rosh server starting up (after fork), log file: {}",
+        log_file_path.display()
+    );
+    info!("Server args: {:?}", args);
+
+    // Continue with the actual server logic
+    run_server(args, bound_addr, session_key, log_file_path, socket).await
+}
+
 /// Run the actual server after forking/detaching
 async fn run_server(
     args: Args,
@@ -166,28 +207,8 @@ async fn run_server(
     // Create a channel to signal when QUIC is ready
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-    // Start hole punch responder if we have session info (one-shot mode)
-    let hole_punch_handle = if let Some(ref key) = session_key {
-        info!(
-            "Starting UDP hole punch responder on port {}",
-            bound_addr.port()
-        );
-        let key_clone = key.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = crate::hole_punch::server_hole_punch_responder(
-                bound_addr.port(),
-                &key_clone,
-                ready_rx,
-            )
-            .await
-            {
-                error!("Hole punch responder error: {}", e);
-            }
-        }))
-    } else {
-        let _ = ready_rx; // Consume receiver to avoid warning
-        None
-    };
+    // Consume ready channel since we're not using hole punch responder
+    drop(ready_rx);
 
     // Create network transport
     let transport = if let Some(socket) = socket {
@@ -195,17 +216,36 @@ async fn run_server(
             "Creating NetworkTransport from existing socket on {}",
             bound_addr
         );
-        NetworkTransport::new_server_from_socket(socket, transport_config).await?
+        // Use the existing socket instead of dropping it
+        match NetworkTransport::new_server_from_socket(socket, transport_config).await {
+            Ok(t) => {
+                info!("NetworkTransport created successfully");
+                // In one-shot mode, set the session key
+                if let Some(ref key) = session_key {
+                    t.with_encryption(key.clone(), args.cipher)
+                } else {
+                    t
+                }
+            }
+            Err(e) => {
+                error!("Failed to create NetworkTransport: {}", e);
+                return Err(e.into());
+            }
+        }
     } else {
         info!("Creating NetworkTransport on {}", bound_addr);
-        NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config).await?
+        let t = NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config)
+            .await?;
+        // In one-shot mode, set the session key
+        if let Some(ref key) = session_key {
+            t.with_encryption(key.clone(), args.cipher)
+        } else {
+            t
+        }
     };
 
-    // Signal that QUIC is ready
-    if let Some(_) = hole_punch_handle {
-        let _ = ready_tx.send(());
-        info!("QUIC transport ready, hole punch responder activated");
-    }
+    // Signal that QUIC is ready (not used anymore)
+    let _ = ready_tx.send(());
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
 
@@ -303,7 +343,89 @@ async fn run_server(
     }
 }
 
-pub async fn run() -> Result<()> {
+/// Main entry point that handles forking before creating tokio runtime
+pub fn main() -> Result<()> {
+    // Parse args early to determine if we need to fork
+    let args = Args::parse();
+
+    // Handle the forking/detaching logic BEFORE creating tokio runtime
+    if args.detach && args.one_shot {
+        // We need to handle the bootstrap sequence before forking
+        // This includes binding the port and printing connection params
+
+        // Generate session key for one-shot mode
+        use rand::RngCore;
+        let mut session_key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut session_key);
+
+        // Bind port synchronously BEFORE forking
+        let (socket, bound_addr) = bootstrap::server::bind_available_port(args.bind)?;
+
+        // Set up log file
+        let log_file_path = if let Some(path) = &args.log_file {
+            path.clone()
+        } else {
+            // Generate a temporary log file
+            let temp_file = tempfile::Builder::new()
+                .prefix("rosh-server-")
+                .suffix(".log")
+                .tempfile()
+                .context("Failed to create temporary log file")?;
+            let (_, path) = temp_file
+                .keep()
+                .map_err(|e| anyhow::anyhow!("Failed to persist temp log file: {}", e))?;
+            path
+        };
+
+        // Print log file path to stdout for the client to capture
+        println!("SERVER_LOG_FILE: {}", log_file_path.display());
+
+        // Generate bootstrap params
+        let params =
+            bootstrap::server::generate_bootstrap_params(bound_addr, &session_key, &log_file_path);
+
+        // Print connection params BEFORE detaching (like mosh)
+        if unsafe { libc::isatty(0) } == 1 {
+            println!("\r");
+        }
+        println!("ROSH CONNECT {} {}", params.port, params.session_key);
+        std::io::stdout().flush()?;
+
+        // NOW detach
+        bootstrap::server::detach_without_params()?;
+
+        // After forking, create the tokio runtime and run the server
+        eprintln!("DEBUG: Creating tokio runtime after fork");
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("ERROR: Failed to create tokio runtime: {e}");
+                return Err(e.into());
+            }
+        };
+        eprintln!("DEBUG: Tokio runtime created, running server");
+
+        let result = runtime.block_on(run_server_after_fork(
+            args,
+            bound_addr,
+            Some(session_key),
+            log_file_path,
+            Some(socket),
+        ));
+
+        if let Err(ref e) = result {
+            eprintln!("ERROR: Server failed: {e}");
+        }
+        result
+    } else {
+        // Normal case - create runtime and run
+        let runtime = tokio::runtime::Runtime::new()?;
+        runtime.block_on(run())
+    }
+}
+
+/// The original async run function
+async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Initialize logging
@@ -395,12 +517,12 @@ pub async fn run() -> Result<()> {
     }
 
     // Bind port synchronously BEFORE forking (like mosh does)
-    let (socket, bound_addr) = if args.detach && args.one_shot {
-        // For detach mode, bind synchronously before forking
+    let (socket, bound_addr) = if args.one_shot {
+        // For one-shot mode, always bind before forking to get the port
         let (socket, addr) = bootstrap::server::bind_available_port(args.bind)?;
         (Some(socket), addr)
     } else {
-        // For non-detach mode, we'll let NetworkTransport handle binding
+        // For non-one-shot mode, let NetworkTransport handle binding
         (None, args.bind)
     };
 

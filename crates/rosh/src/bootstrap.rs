@@ -6,11 +6,10 @@
 //! - proxy: Use SSH ProxyCommand (default)
 
 use anyhow::{Context, Result};
+use std::io::{BufRead, BufReader, Read};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tracing::{debug, info};
 
 use rosh_crypto::CipherAlgorithm;
@@ -28,7 +27,7 @@ pub enum RemoteIpStrategy {
 }
 
 impl RemoteIpStrategy {
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "local" => Ok(Self::Local),
             "remote" => Ok(Self::Remote),
@@ -95,7 +94,7 @@ pub enum NetworkFamily {
 }
 
 impl NetworkFamily {
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "inet" | "ipv4" | "4" => Ok(Self::Inet),
             "inet6" | "ipv6" | "6" => Ok(Self::Inet6),
@@ -323,7 +322,7 @@ pub mod client {
 
         // Basic SSH options
         ssh_cmd.arg("-n"); // No stdin
-        ssh_cmd.arg("-T"); // No PTY allocation
+        ssh_cmd.arg("-tt"); // Force PTY allocation (like mosh)
 
         // Add ProxyCommand
         ssh_cmd.arg("-o").arg(format!("ProxyCommand={proxy_cmd}"));
@@ -344,7 +343,7 @@ pub mod client {
         ssh_cmd.arg(ssh_target);
         ssh_cmd.arg("--");
 
-        // Set up process
+        // Set up process - capture both stdout and stderr
         ssh_cmd.stdout(Stdio::piped());
         ssh_cmd.stderr(Stdio::piped());
 
@@ -352,100 +351,115 @@ pub mod client {
         let remote_cmd = build_remote_command(options);
         ssh_cmd.arg(remote_cmd);
 
-        // Execute and collect output
+        // Execute SSH command
         debug!("Executing SSH command with ProxyCommand");
-        let mut child = ssh_cmd.spawn().context("Failed to spawn SSH process")?;
 
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get stderr from SSH"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get stdout from SSH"))?;
+        // We need to spawn in a way that we can read output while it runs
+        // Since we're using -tt, SSH will stay connected until we kill it
+        let output = tokio::task::spawn_blocking(move || {
+            use std::sync::mpsc;
+            use std::thread;
 
-        let mut stderr_reader = BufReader::new(stderr);
-        let mut stdout_reader = BufReader::new(stdout);
-        let mut output = String::new();
-        let mut resolved_ip = None;
+            let mut child = ssh_cmd.spawn().context("Failed to spawn SSH process")?;
 
-        let timeout = Duration::from_secs(10);
-        let start = std::time::Instant::now();
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get stdout"))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("Failed to get stderr"))?;
 
-        // Read stderr for ROSH IP line
-        let mut stderr_line = String::new();
-        while start.elapsed() < timeout {
-            match tokio::time::timeout(
-                Duration::from_millis(100),
-                stderr_reader.read_line(&mut stderr_line),
-            )
-            .await
-            {
-                Ok(Ok(0)) => break, // EOF
-                Ok(Ok(_)) => {
-                    if stderr_line.starts_with("ROSH IP ") {
-                        let ip_str = stderr_line.trim_start_matches("ROSH IP ").trim();
+            // Spawn threads to read stdout and stderr
+            let (stdout_tx, stdout_rx) = mpsc::channel();
+            let (stderr_tx, stderr_rx) = mpsc::channel();
+
+            let stdout_thread = thread::spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let _ = stdout_tx.send(line.clone());
+                    line.clear();
+                }
+            });
+
+            let stderr_thread = thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let _ = stderr_tx.send(line.clone());
+                    line.clear();
+                }
+            });
+
+            let mut output_str = String::new();
+            let mut stderr_str = String::new();
+            let mut resolved_ip = None;
+            let mut got_connect = false;
+            let mut got_ip = false;
+
+            let timeout = Duration::from_secs(10);
+            let start = std::time::Instant::now();
+
+            while start.elapsed() < timeout && (!got_connect || !got_ip) {
+                // Check stdout
+                if let Ok(line) = stdout_rx.try_recv() {
+                    output_str.push_str(&line);
+                    if line.contains("ROSH CONNECT ") {
+                        got_connect = true;
+                        debug!("Found ROSH CONNECT in output");
+                        // Drain any remaining lines
+                        thread::sleep(Duration::from_millis(50));
+                        while let Ok(line) = stdout_rx.try_recv() {
+                            output_str.push_str(&line);
+                        }
+                    }
+                }
+
+                // Check stderr
+                if let Ok(line) = stderr_rx.try_recv() {
+                    stderr_str.push_str(&line);
+                    if line.trim().starts_with("ROSH IP ") {
+                        let ip_str = line.trim().strip_prefix("ROSH IP ").unwrap().trim();
                         resolved_ip =
                             Some(ip_str.parse::<IpAddr>().with_context(|| {
                                 format!("Failed to parse IP from proxy: {ip_str}")
                             })?);
-                        debug!("Proxy resolved IP: {:?}", resolved_ip);
-                    }
-                    stderr_line.clear();
-                }
-                Ok(Err(e)) => debug!("Error reading stderr: {}", e),
-                Err(_) => continue,
-            }
-        }
-
-        // Read stdout for server output
-        while start.elapsed() < timeout {
-            let mut line = String::new();
-            match tokio::time::timeout(
-                Duration::from_millis(100),
-                stdout_reader.read_line(&mut line),
-            )
-            .await
-            {
-                Ok(Ok(0)) => break, // EOF
-                Ok(Ok(_)) => {
-                    output.push_str(&line);
-                    // Check if we have all required output
-                    if output.contains("ROSH CONNECT ") {
-                        // Give a brief moment for any remaining output
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        // Read any remaining lines without blocking
-                        while let Ok(Ok(n)) = tokio::time::timeout(
-                            Duration::from_millis(10),
-                            stdout_reader.read_line(&mut line),
-                        )
-                        .await
-                        {
-                            if n == 0 {
-                                break;
-                            }
-                            output.push_str(&line);
-                            line.clear();
-                        }
-                        break;
+                        debug!("Found proxy-resolved IP: {:?}", resolved_ip);
+                        got_ip = true;
                     }
                 }
-                Ok(Err(e)) => return Err(e).context("Failed to read SSH output"),
-                Err(_) => continue,
+
+                if !got_connect && !got_ip {
+                    thread::sleep(Duration::from_millis(10));
+                }
             }
-        }
 
-        // Wait for SSH process to exit naturally (like mosh)
-        // The server detached, so SSH should exit on its own
-        let _ = child.wait().await;
+            // Kill the SSH process
+            let _ = child.kill();
+            let _ = child.wait();
 
-        if output.is_empty() {
+            // Wait for reader threads
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+
+            debug!("SSH stdout: {}", output_str);
+            debug!("SSH stderr: {}", stderr_str);
+
+            Ok::<_, anyhow::Error>((output_str, stderr_str, resolved_ip))
+        })
+        .await
+        .context("Failed to execute SSH command")??;
+
+        let (output_str, _stderr_str, resolved_ip) = output;
+
+        if output_str.is_empty() {
             anyhow::bail!("SSH command produced no output");
         }
 
         // Parse server output
-        let mut params = parse_server_output(&output)?;
+        let mut params = parse_server_output(&output_str)?;
 
         // Use the IP resolved by the proxy if available
         if let Some(ip) = resolved_ip {
@@ -466,6 +480,7 @@ pub mod client {
 
         // Basic SSH options (like mosh)
         cmd.arg("-n"); // No stdin
+        cmd.arg("-tt"); // Force PTY allocation
 
         // Only set port if explicitly specified
         // This allows SSH config to take precedence for hosts defined there
@@ -547,67 +562,24 @@ pub mod client {
     }
 
     /// Execute SSH command and collect output
-    async fn execute_ssh_command(mut cmd: Command) -> Result<String> {
-        debug!("Executing SSH command to start remote server");
-        let mut child = cmd.spawn().context("Failed to spawn SSH process")?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get stdout from SSH"))?;
-
-        let mut stdout_reader = BufReader::new(stdout);
-        let mut output = String::new();
-
-        let timeout = Duration::from_secs(10);
-        let start = std::time::Instant::now();
-
-        // Read until we get the required output or timeout
-        while start.elapsed() < timeout {
-            let mut line = String::new();
-            match tokio::time::timeout(
-                Duration::from_millis(100),
-                stdout_reader.read_line(&mut line),
-            )
+    async fn execute_ssh_command(cmd: Command) -> Result<String> {
+        // Simple version for non-proxy commands
+        let output = tokio::process::Command::from(cmd)
+            .output()
             .await
-            {
-                Ok(Ok(0)) => break, // EOF
-                Ok(Ok(_)) => {
-                    output.push_str(&line);
-                    // Check if we have all required output
-                    if output.contains("ROSH CONNECT ") {
-                        // Give a brief moment for any remaining output
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        // Read any remaining lines without blocking
-                        while let Ok(Ok(n)) = tokio::time::timeout(
-                            Duration::from_millis(10),
-                            stdout_reader.read_line(&mut line),
-                        )
-                        .await
-                        {
-                            if n == 0 {
-                                break;
-                            }
-                            output.push_str(&line);
-                            line.clear();
-                        }
-                        break;
-                    }
-                }
-                Ok(Err(e)) => return Err(e).context("Failed to read SSH output"),
-                Err(_) => continue, // Timeout on read, continue
-            }
+            .context("Failed to execute SSH command")?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "SSH command failed. stdout:\n{}\nstderr:\n{}",
+                stdout,
+                stderr
+            );
         }
 
-        // Wait for SSH process to exit naturally (like mosh)
-        // The server detached, so SSH should exit on its own
-        let _ = child.wait().await;
-
-        if output.is_empty() {
-            anyhow::bail!("SSH command produced no output");
-        }
-
-        Ok(output)
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Parse server output for connection parameters
@@ -684,7 +656,19 @@ pub mod server {
             match unsafe { libc::fork() } {
                 -1 => anyhow::bail!("Failed to fork: {}", std::io::Error::last_os_error()),
                 0 => {
-                    // Child process - continue execution
+                    // Child process - redirect stderr to a debug file
+                    if let Ok(debug_file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/rosh-server-debug.log")
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        unsafe {
+                            libc::dup2(debug_file.as_raw_fd(), 2);
+                        }
+                    }
+
+                    // Continue execution
                     Ok(())
                 }
                 pid => {
@@ -721,7 +705,6 @@ pub mod server {
     pub fn detach_and_communicate(params: &BootstrapConnectParams) -> Result<()> {
         #[cfg(unix)]
         {
-            use std::io::Read;
             use std::os::unix::io::FromRawFd;
 
             // Create pipe for communication
@@ -854,7 +837,7 @@ pub mod server {
     pub fn generate_bootstrap_params(
         bound_addr: SocketAddr,
         session_key: &[u8],
-        log_file_path: &PathBuf,
+        log_file_path: &Path,
     ) -> BootstrapConnectParams {
         use base64::Engine;
         let encoded_key = base64::engine::general_purpose::STANDARD.encode(session_key);
