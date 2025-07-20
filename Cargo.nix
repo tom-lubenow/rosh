@@ -5149,6 +5149,10 @@ rec {
             packageId = "serde_json";
           }
           {
+            name = "tempfile";
+            packageId = "tempfile";
+          }
+          {
             name = "tokio";
             packageId = "tokio";
             features = [ "full" "rt-multi-thread" "macros" "sync" "time" "process" "io-util" ];
@@ -5184,10 +5188,6 @@ rec {
           {
             name = "rosh-test-utils";
             packageId = "rosh-test-utils";
-          }
-          {
-            name = "tempfile";
-            packageId = "tempfile";
           }
         ];
 

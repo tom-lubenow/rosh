@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum LogLevel {
@@ -284,6 +284,40 @@ impl Drop for TerminalUI {
     }
 }
 
+/// Retrieve server logs via SSH
+async fn retrieve_server_logs(host: &str, log_path: &str) {
+    info!("Attempting to retrieve server logs from {}", log_path);
+
+    // Build SSH command to cat the log file
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-n"); // No stdin
+    cmd.arg("-T"); // No PTY
+    cmd.arg(host);
+    cmd.arg(format!("cat {}", log_path));
+
+    match cmd.output().await {
+        Ok(output) => {
+            if output.status.success() {
+                let logs = String::from_utf8_lossy(&output.stdout);
+                if !logs.trim().is_empty() {
+                    error!("Server logs from {}:", log_path);
+                    for line in logs.lines() {
+                        error!("  {}", line);
+                    }
+                } else {
+                    warn!("Server log file {} is empty", log_path);
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to retrieve server logs: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            warn!("Failed to execute SSH command to retrieve logs: {}", e);
+        }
+    }
+}
+
 /// Parse server argument to determine connection type
 pub fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
     if server.contains('@') {
@@ -345,7 +379,7 @@ pub async fn run() -> Result<()> {
     let remote_ip_strategy = RemoteIpStrategy::from_str(&args.experimental_remote_ip)?;
 
     // Get connection info
-    let (server_addr, session_key_str) = if is_ssh {
+    let (server_addr, session_key_str, log_file) = if is_ssh {
         // SSH connection
         if args.key.is_some() {
             anyhow::bail!("Cannot specify --key with SSH connection");
@@ -378,7 +412,8 @@ pub async fn run() -> Result<()> {
         );
 
         let server_addr = SocketAddr::new(connect_params.ip.parse()?, connect_params.port);
-        (server_addr, connect_params.session_key)
+        let log_file = connect_params.log_file.clone();
+        (server_addr, connect_params.session_key, log_file)
     } else {
         // Direct connection
         let session_key = args
@@ -391,7 +426,7 @@ pub async fn run() -> Result<()> {
             .with_context(|| format!("Failed to parse server address: {}", args.server))?;
 
         info!("Using direct connection to {}", server_addr);
-        (server_addr, session_key)
+        (server_addr, session_key, None)
     };
 
     info!("Connecting to Rosh server via QUIC at {}", server_addr);
@@ -436,8 +471,18 @@ pub async fn run() -> Result<()> {
                 info!("QUIC connection established successfully");
                 conn
             }
-            Ok(Err(e)) => anyhow::bail!("Failed to connect to Rosh server: {}", e),
-            Err(_) => anyhow::bail!("QUIC connection timeout after 5 seconds"),
+            Ok(Err(e)) => {
+                if let Some(ref log_path) = log_file {
+                    retrieve_server_logs(&host, log_path).await;
+                }
+                anyhow::bail!("Failed to connect to Rosh server: {}", e)
+            }
+            Err(_) => {
+                if let Some(ref log_path) = log_file {
+                    retrieve_server_logs(&host, log_path).await;
+                }
+                anyhow::bail!("QUIC connection timeout after 5 seconds")
+            }
         };
 
     // Send handshake

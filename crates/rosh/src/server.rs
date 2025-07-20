@@ -10,7 +10,7 @@ use rosh_pty::{PtySession, SessionBuilder, SessionEvent};
 use rosh_state::{CompressionAlgorithm, StateMessage, StateSynchronizer};
 use std::collections::HashMap;
 use std::io::Write;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,6 +74,10 @@ struct Args {
     /// Detach from parent process and become a daemon (for SSH bootstrap)
     #[arg(long)]
     detach: bool,
+
+    /// Path to log file (stdout if not specified)
+    #[arg(long)]
+    log_file: Option<PathBuf>,
 }
 
 /// Active session state
@@ -84,6 +88,7 @@ struct Session {
     _client_addr: SocketAddr,
     last_activity: Arc<RwLock<time::Instant>>,
 }
+
 
 /// Server state
 struct ServerState {
@@ -220,6 +225,20 @@ fn detach_and_communicate(params: &BootstrapConnectParams) -> Result<()> {
     }
 }
 
+/// Bind to a UDP socket synchronously to find an available port
+fn bind_available_port(addr: SocketAddr) -> Result<(UdpSocket, SocketAddr)> {
+    let socket = UdpSocket::bind(addr)
+        .with_context(|| format!("Failed to bind to {}", addr))?;
+    
+    // Get the actual bound address (important when port is 0)
+    let bound_addr = socket.local_addr()
+        .context("Failed to get local address")?;
+    
+    info!("Bound UDP socket to {}", bound_addr);
+    
+    Ok((socket, bound_addr))
+}
+
 /// Generate a self-signed certificate for one-shot mode
 fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
     use rcgen::{Certificate, CertificateParams, DistinguishedName};
@@ -246,50 +265,14 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
     Ok((cert_pem.into_bytes(), key_pem.into_bytes()))
 }
 
-pub async fn run() -> Result<()> {
-    let args = Args::parse();
-
-    // Initialize logging
-    let log_level = if args.one_shot {
-        // In one-shot mode, only show errors to avoid interfering with terminal
-        tracing::Level::ERROR
-    } else {
-        match args.log_level {
-            LogLevel::Trace => tracing::Level::TRACE,
-            LogLevel::Debug => tracing::Level::DEBUG,
-            LogLevel::Info => tracing::Level::INFO,
-            LogLevel::Warn => tracing::Level::WARN,
-            LogLevel::Error => tracing::Level::ERROR,
-        }
-    };
-
-    // In one-shot mode, only output to stderr with minimal formatting
-    if args.one_shot {
-        tracing_subscriber::fmt()
-            .with_max_level(log_level)
-            .with_writer(std::io::stderr)
-            .with_target(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .compact()
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_max_level(log_level).init();
-    }
-
-    // Generate session key for one-shot mode
-    let session_key = if args.one_shot {
-        use rand::RngCore;
-        let mut key = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
-        Some(key)
-    } else {
-        None
-    };
-
-    if !args.one_shot {
-        info!("Starting Rosh server on {}", args.bind);
-    }
+/// Run the actual server after forking/detaching
+async fn run_server(
+    args: Args,
+    bound_addr: SocketAddr,
+    session_key: Option<Vec<u8>>,
+    _log_file_path: PathBuf,
+) -> Result<()> {
+    info!("Starting server main loop on {}", bound_addr);
 
     // Load certificates
     let (cert_chain, private_key) = if args.one_shot {
@@ -321,45 +304,17 @@ pub async fn run() -> Result<()> {
         cert_validation: rosh_network::CertValidationMode::default(),
     };
 
-    // Create network transport
+    // Create network transport using the already-bound address
+    info!("Creating NetworkTransport on {}", bound_addr);
     let transport =
-        NetworkTransport::new_server(args.bind, cert_chain, private_key, transport_config).await?;
-
-    // Get actual bound address (in case port was 0)
-    let bound_addr = transport.local_addr()?;
-
-    // Prepare connection parameters if in one-shot mode
-    let params = if args.one_shot {
-        use base64::Engine;
-        let encoded_key =
-            base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
-
-        Some(BootstrapConnectParams {
-            ip: bound_addr.ip().to_string(),
-            port: bound_addr.port(),
-            session_key: encoded_key,
-        })
-    } else {
-        None
-    };
-
-    // Detach if requested (which also outputs connection params)
-    if args.detach {
-        if let Some(params) = params {
-            detach_and_communicate(&params)?;
-        } else {
-            anyhow::bail!("Detach requires one-shot mode");
-        }
-    } else if let Some(params) = params {
-        // Not detaching, just print params normally
-        println!("ROSH_CONNECT_PARAMS: {}", serde_json::to_string(&params)?);
-        std::io::stdout().flush()?;
-    }
+        NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config).await?;
 
     let server_state = Arc::new(ServerState::new(args.max_sessions));
 
     if !args.one_shot {
         info!("Server listening on {}", bound_addr);
+    } else {
+        info!("Server in one-shot mode, listening on {}", bound_addr);
     }
 
     // Accept connections
@@ -373,10 +328,15 @@ pub async fn run() -> Result<()> {
     };
 
     loop {
+        info!("Waiting for incoming connection...");
         let accept_result = if let Some(timeout) = timeout_duration {
             // Accept with timeout
+            info!("Accepting with timeout of {:?}", timeout);
             match time::timeout(timeout, transport.accept()).await {
-                Ok(result) => result,
+                Ok(result) => {
+                    info!("Accept completed within timeout");
+                    result
+                }
                 Err(_) => {
                     warn!("Timeout waiting for connection");
                     return Ok(());
@@ -384,6 +344,7 @@ pub async fn run() -> Result<()> {
             }
         } else {
             // Accept without timeout
+            info!("Accepting without timeout");
             transport.accept().await
         };
 
@@ -430,14 +391,154 @@ pub async fn run() -> Result<()> {
                         }
                     });
                 }
-
-                _connection_count += 1;
             }
             Err(e) => {
-                error!("Failed to accept connection: {}", e);
+                warn!("Failed to accept connection: {}", e);
+                if args.one_shot {
+                    return Err(e).context("Failed to accept one-shot connection");
+                }
+                // In normal mode, continue accepting
             }
         }
+
+        _connection_count += 1;
     }
+}
+
+pub async fn run() -> Result<()> {
+    let args = Args::parse();
+
+    // Initialize logging
+    let log_level = if args.one_shot {
+        // In one-shot mode, only show errors to avoid interfering with terminal
+        tracing::Level::ERROR
+    } else {
+        match args.log_level {
+            LogLevel::Trace => tracing::Level::TRACE,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Error => tracing::Level::ERROR,
+        }
+    };
+
+    // Set up logging - always use a log file
+    let log_file_path = if let Some(path) = &args.log_file {
+        path.clone()
+    } else {
+        // Generate a temporary log file
+        let temp_file = tempfile::Builder::new()
+            .prefix("rosh-server-")
+            .suffix(".log")
+            .tempfile()
+            .context("Failed to create temporary log file")?;
+        
+        // Get the path and keep the file from being deleted
+        let (_, path) = temp_file.keep()
+            .map_err(|e| anyhow::anyhow!("Failed to persist temp log file: {}", e))?;
+        path
+    };
+    
+    // Print log file path to stdout for the client to capture
+    println!("SERVER_LOG_FILE: {}", log_file_path.display());
+    
+    // Open log file for writing
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file_path)
+        .with_context(|| format!("Failed to open log file: {}", log_file_path.display()))?;
+    
+    // Force log_level to at least INFO for debugging
+    let effective_log_level = match log_level {
+        tracing::Level::ERROR => tracing::Level::INFO,
+        other => other,
+    };
+    
+    // Use file writer for logging
+    if args.one_shot {
+        tracing_subscriber::fmt()
+            .with_max_level(effective_log_level)
+            .with_writer(log_file)
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_ansi(false)
+            .compact()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_max_level(effective_log_level)
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    }
+    
+    // Log initial startup message
+    info!("Rosh server starting up, log file: {}", log_file_path.display());
+    info!("Server args: {:?}", args);
+
+    // Generate session key for one-shot mode
+    let session_key = if args.one_shot {
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Some(key)
+    } else {
+        None
+    };
+
+    if !args.one_shot {
+        info!("Starting Rosh server on {}", args.bind);
+    }
+
+    // Bind port synchronously BEFORE forking (like mosh does)
+    let bound_addr = if args.detach && args.one_shot {
+        // For detach mode, bind synchronously before forking
+        let (_socket, addr) = bind_available_port(args.bind)?;
+        // Close the socket immediately - we'll recreate it after forking
+        drop(_socket);
+        addr
+    } else {
+        // For non-detach mode, we'll let NetworkTransport handle binding
+        args.bind
+    };
+
+    // Prepare connection parameters if in one-shot mode
+    let params = if args.one_shot {
+        use base64::Engine;
+        let encoded_key =
+            base64::engine::general_purpose::STANDARD.encode(session_key.as_ref().unwrap());
+
+        Some(BootstrapConnectParams {
+            ip: bound_addr.ip().to_string(),
+            port: bound_addr.port(),
+            session_key: encoded_key,
+            log_file: Some(log_file_path.display().to_string()),
+        })
+    } else {
+        None
+    };
+
+    // Detach if requested (which also outputs connection params)
+    if args.detach {
+        if let Some(params) = params {
+            info!("About to detach as daemon process");
+            info!("Connection params: {:?}", params);
+            detach_and_communicate(&params)?;
+        } else {
+            anyhow::bail!("Detach requires one-shot mode");
+        }
+    } else if let Some(params) = params {
+        // Not detaching, just print params normally
+        println!("ROSH_CONNECT_PARAMS: {}", serde_json::to_string(&params)?);
+        std::io::stdout().flush()?;
+    }
+
+    info!("Detach complete, continuing server initialization");
+
+    // Now run the actual server with the bound address
+    run_server(args, bound_addr, session_key, log_file_path).await
 }
 
 async fn handle_connection(

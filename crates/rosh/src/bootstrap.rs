@@ -47,6 +47,8 @@ pub struct BootstrapInfo {
     pub port: u16,
     /// Session key (base64 encoded)
     pub session_key: String,
+    /// Log file path (optional)
+    pub log_file: Option<String>,
 }
 
 /// Connection parameters for establishing a Rosh connection
@@ -58,6 +60,9 @@ pub struct BootstrapConnectParams {
     pub port: u16,
     /// Session key (base64 encoded)
     pub session_key: String,
+    /// Log file path (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_file: Option<String>,
 }
 
 impl From<BootstrapInfo> for BootstrapConnectParams {
@@ -66,6 +71,7 @@ impl From<BootstrapInfo> for BootstrapConnectParams {
             ip: info.ip.to_string(),
             port: info.port,
             session_key: info.session_key,
+            log_file: info.log_file,
         }
     }
 }
@@ -164,6 +170,7 @@ async fn bootstrap_local_resolution(options: BootstrapOptions<'_>) -> Result<Boo
         ip,
         port,
         session_key,
+        log_file: None,
     })
 }
 
@@ -180,13 +187,18 @@ async fn bootstrap_remote_resolution(options: BootstrapOptions<'_>) -> Result<Bo
 
     // Start server via SSH with SSH_CONNECTION capture
     info!("Starting Rosh server via SSH and capturing SSH_CONNECTION");
-    let (ip, port, session_key) = start_server_ssh_with_connection(&ssh_target, &options).await?;
+    let (ip, port, session_key, log_file) =
+        start_server_ssh_with_connection(&ssh_target, &options).await?;
     info!("Server started on {}:{} with session key", ip, port);
+    if let Some(ref log_path) = log_file {
+        info!("Server log file: {}", log_path);
+    }
 
     Ok(BootstrapInfo {
         ip,
         port,
         session_key,
+        log_file,
     })
 }
 
@@ -259,14 +271,15 @@ async fn start_server_ssh(
 
     // Execute and parse output
     let output = execute_ssh_command(ssh_cmd).await?;
-    parse_server_output(&output)
+    let (port, session_key, _log_file) = parse_server_output(&output)?;
+    Ok((port, session_key))
 }
 
 /// Start server via SSH with SSH_CONNECTION capture
 async fn start_server_ssh_with_connection(
     ssh_target: &str,
     options: &BootstrapOptions<'_>,
-) -> Result<(IpAddr, u16, String)> {
+) -> Result<(IpAddr, u16, String, Option<String>)> {
     let mut ssh_cmd = build_ssh_command(ssh_target, options, true);
 
     // Build remote command with SSH_CONNECTION capture
@@ -278,12 +291,12 @@ async fn start_server_ssh_with_connection(
 
     // Execute and parse output
     let output = execute_ssh_command(ssh_cmd).await?;
-    let (port, session_key) = parse_server_output(&output)?;
+    let (port, session_key, log_file) = parse_server_output(&output)?;
 
     // Parse SSH_CONNECTION to get server IP
     let ip = parse_ssh_connection(&output)?;
 
-    Ok((ip, port, session_key))
+    Ok((ip, port, session_key, log_file))
 }
 
 /// Build SSH command with appropriate options
@@ -439,8 +452,19 @@ async fn execute_ssh_command(mut cmd: Command) -> Result<String> {
 }
 
 /// Parse server output for connection parameters
-fn parse_server_output(output: &str) -> Result<(u16, String)> {
+fn parse_server_output(output: &str) -> Result<(u16, String, Option<String>)> {
     debug!("Parsing server output for connection parameters");
+
+    // First look for log file path
+    let mut log_file = None;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.starts_with("SERVER_LOG_FILE: ") {
+            log_file = Some(line.strip_prefix("SERVER_LOG_FILE: ").unwrap().to_string());
+            debug!("Found log file: {:?}", log_file);
+            break;
+        }
+    }
 
     // Look for the JSON connection params
     for line in output.lines() {
@@ -452,7 +476,7 @@ fn parse_server_output(output: &str) -> Result<(u16, String)> {
             let params: BootstrapConnectParams = serde_json::from_str(json_str)
                 .context("Failed to parse connection parameters JSON")?;
 
-            return Ok((params.port, params.session_key));
+            return Ok((params.port, params.session_key, log_file));
         }
     }
 
@@ -547,7 +571,7 @@ ROSH_KEY=QTmjegDO4+NBlwqAF2MCMEa/NBqJPeba8ypiKSfEiRA=
 Server listening on 0.0.0.0:2022
 "#;
 
-        let (port, key) = parse_server_output(output).unwrap();
+        let (port, key, _log_file) = parse_server_output(output).unwrap();
         assert_eq!(port, 2022);
         assert_eq!(key, "QTmjegDO4+NBlwqAF2MCMEa/NBqJPeba8ypiKSfEiRA=");
     }
