@@ -290,38 +290,6 @@ async fn run_server(
             bound_addr
         );
 
-        // First, let's verify we can receive UDP packets on this port
-        info!(
-            "Testing UDP reception on {} before creating QUIC endpoint",
-            bound_addr
-        );
-        let test_socket = std::net::UdpSocket::bind(bound_addr)?;
-        test_socket.set_nonblocking(true)?;
-        let test_socket = tokio::net::UdpSocket::from_std(test_socket)?;
-
-        // Try to receive for a short time
-        let mut buf = vec![0u8; 1024];
-        match tokio::time::timeout(Duration::from_secs(2), test_socket.recv_from(&mut buf)).await {
-            Ok(Ok((n, peer))) => {
-                info!(
-                    "Received {} bytes from {} during UDP test: {:?}",
-                    n,
-                    peer,
-                    String::from_utf8_lossy(&buf[..n])
-                );
-            }
-            Ok(Err(e)) => {
-                warn!("UDP receive error during test: {}", e);
-            }
-            Err(_) => {
-                info!("No UDP packets received during 2 second test window");
-            }
-        }
-
-        // Close test socket
-        drop(test_socket);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
         let t = NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config)
             .await?;
         match t.local_addr() {

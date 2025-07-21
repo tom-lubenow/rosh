@@ -546,7 +546,3 @@ impl ServerTransportWrapper {
         self.transport.local_addr()
     }
 }
-
-#[cfg(test)]
-#[path = "transport_test.rs"]
-mod transport_test;

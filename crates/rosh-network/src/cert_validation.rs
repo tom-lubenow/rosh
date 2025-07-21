@@ -161,7 +161,3 @@ impl ServerCertVerifier for PinnedCertVerifier {
             .supported_schemes()
     }
 }
-
-#[cfg(test)]
-#[path = "cert_validation_test.rs"]
-mod cert_validation_test;

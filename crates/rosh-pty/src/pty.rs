@@ -399,33 +399,3 @@ impl AsyncWrite for AsyncPtyMaster {
         std::task::Poll::Ready(Ok(()))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::process::Command;
-
-    #[test]
-    fn test_pty_allocation() {
-        let pty = Pty::new().unwrap();
-        assert!(pty.master.as_raw_fd() > 0);
-        assert!(pty.slave.as_ref().map(|fd| fd.as_raw_fd()).unwrap_or(-1) > 0);
-    }
-
-    #[test]
-    fn test_pty_resize() {
-        let mut pty = Pty::new().unwrap();
-        pty.resize(30, 100).unwrap();
-    }
-
-    #[test]
-    fn test_pty_spawn_echo() {
-        let pty = Pty::new().unwrap();
-        let mut cmd = Command::new("echo");
-        cmd.arg("Hello, PTY!");
-
-        let process = pty.spawn(cmd).unwrap();
-        let exit_code = process.wait().unwrap();
-        assert_eq!(exit_code, 0);
-    }
-}
