@@ -65,11 +65,17 @@ async fn main() -> Result<()> {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(SkipVerification))
         .with_no_client_auth();
-    client_crypto.alpn_protocols = vec![b"echo".to_vec()];
+    client_crypto.alpn_protocols = vec![b"rosh/1".to_vec()];
     
-    let client_config = ClientConfig::new(Arc::new(
+    let mut client_config = ClientConfig::new(Arc::new(
         quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?
     ));
+    
+    // Add transport config to match Rosh
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(quinn::VarInt::from_u32(90_000).into())); // 90 seconds
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(30)));
+    client_config.transport_config(Arc::new(transport));
     
     // Create endpoint
     println!("Creating QUIC client");
@@ -79,7 +85,10 @@ async fn main() -> Result<()> {
     
     // Connect to server
     println!("Connecting to {}...", server_addr);
-    let connection = endpoint.connect(server_addr, "localhost")?.await?;
+    println!("Using ALPN: rosh/1");
+    let connecting = endpoint.connect(server_addr, "localhost")?;
+    println!("Connection initiated, performing handshake...");
+    let connection = connecting.await?;
     println!("Connected!");
     
     // Open a stream

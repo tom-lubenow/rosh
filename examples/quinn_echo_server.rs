@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let addr: SocketAddr = "127.0.0.1:2022".parse()?;
+    let addr: SocketAddr = "0.0.0.0:2022".parse()?;
     
     // Generate self-signed certificate
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
@@ -30,11 +30,18 @@ async fn main() -> Result<()> {
             vec![rustls::pki_types::CertificateDer::from(cert_der)],
             rustls::pki_types::PrivatePkcs8KeyDer::from(key_der).into()
         )?;
-    server_crypto.alpn_protocols = vec![b"echo".to_vec()];
+    server_crypto.alpn_protocols = vec![b"rosh/1".to_vec()];
+    println!("Server config ALPN: rosh/1");
     
-    let server_config = ServerConfig::with_crypto(Arc::new(
+    let mut server_config = ServerConfig::with_crypto(Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto)?
     ));
+    
+    // Add transport config to match Rosh
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(quinn::VarInt::from_u32(90_000).into())); // 90 seconds
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(30)));
+    server_config.transport_config(Arc::new(transport));
     
     // Create endpoint
     println!("Starting QUIC echo server on {}", addr);

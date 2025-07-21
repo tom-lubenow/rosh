@@ -13,6 +13,10 @@ path = "quinn_echo_server.rs"
 name = "echo_client"
 path = "quinn_echo_client.rs"
 
+[[bin]]
+name = "rosh_like_server"
+path = "rosh_like_server.rs"
+
 [dependencies]
 anyhow = "1"
 quinn = "0.11"
