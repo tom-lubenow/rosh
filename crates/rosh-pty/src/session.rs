@@ -43,6 +43,12 @@ pub struct PtySession {
 
     /// Write half of the PTY (set after start)
     write_half: Option<Arc<Mutex<tokio::io::WriteHalf<AsyncPtyMaster>>>>,
+
+    /// Process PID (kept after start)
+    pid: Option<nix::unistd::Pid>,
+
+    /// Master FD for resize operations (kept after start)
+    master_fd: Option<std::os::unix::io::RawFd>,
 }
 
 impl PtySession {
@@ -74,18 +80,26 @@ impl PtySession {
             event_tx,
             shutdown_tx: Some(shutdown_tx),
             write_half: None,
+            pid: None,
+            master_fd: None,
         };
 
         Ok((session, event_rx))
     }
 
     /// Start the session I/O loop
-    pub async fn start(mut self) -> Result<(), PtyError> {
+    pub async fn start(&mut self) -> Result<(), PtyError> {
         let process = self
             .process
             .take()
             .ok_or_else(|| PtyError::IoError(std::io::Error::other("Process already taken")))?;
         let pid = process.pid();
+        self.pid = Some(pid);
+
+        // Store the raw FD before taking the master
+        let master_fd = process.master().as_raw_fd();
+        self.master_fd = Some(master_fd);
+
         let master = process.take_master();
         let async_master = AsyncPtyMaster::new(master)?;
 
@@ -198,18 +212,22 @@ impl PtySession {
             ws_ypixel: 0,
         };
 
-        if let Some(ref process) = self.process {
-            let fd = process.master().as_raw_fd();
-            unsafe {
-                let ret = libc::ioctl(fd, libc::TIOCSWINSZ, &winsize as *const _);
-                if ret < 0 {
-                    return Err(PtyError::IoError(std::io::Error::last_os_error()));
-                }
-            }
+        // Use stored master FD if process is taken, otherwise get from process
+        let fd = if let Some(ref process) = self.process {
+            process.master().as_raw_fd()
+        } else if let Some(fd) = self.master_fd {
+            fd
         } else {
             return Err(PtyError::IoError(std::io::Error::other(
-                "Process already taken",
+                "No master FD available",
             )));
+        };
+
+        unsafe {
+            let ret = libc::ioctl(fd, libc::TIOCSWINSZ, &winsize as *const _);
+            if ret < 0 {
+                return Err(PtyError::IoError(std::io::Error::last_os_error()));
+            }
         }
 
         // Resize terminal emulator
@@ -231,11 +249,15 @@ impl PtySession {
 
     /// Kill the process
     pub fn kill(&self) -> Result<(), PtyError> {
+        // Use stored PID if process is taken, otherwise get from process
         if let Some(ref process) = self.process {
             process.kill()
+        } else if let Some(pid) = self.pid {
+            nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM)
+                .map_err(|e| PtyError::IoError(std::io::Error::from_raw_os_error(e as i32)))
         } else {
             Err(PtyError::IoError(std::io::Error::other(
-                "Process already taken",
+                "No process or PID available",
             )))
         }
     }

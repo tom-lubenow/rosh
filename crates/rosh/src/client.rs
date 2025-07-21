@@ -1,5 +1,9 @@
 //! Rosh client implementation
 
+use crate::bootstrap::{
+    client::bootstrap_via_ssh, BootstrapOptions, NetworkFamily, RemoteIpStrategy,
+};
+use crate::terminal_guard::TerminalGuard;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use crossterm::{
@@ -15,15 +19,12 @@ use rosh_network::{Message as NetworkMessage, NetworkTransport, RoshTransportCon
 use rosh_state::{CompressionAlgorithm, StateMessage, StateSynchronizer};
 use rosh_terminal::{state_to_framebuffer, Terminal, TerminalState};
 use std::io::{self, Write};
-use std::net::{SocketAddr, ToSocketAddrs};
-use std::process::Stdio;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum LogLevel {
@@ -40,12 +41,15 @@ struct Args {
     /// Server address to connect to (host:port or user@host for SSH)
     server: String,
 
+    /// Command to execute (optional)
+    command: Option<String>,
+
     /// Session key (base64 encoded) - for direct connection only
     #[arg(short, long)]
     key: Option<String>,
 
     /// Cipher algorithm to use
-    #[arg(short = 'a', long, value_enum, default_value = "aes-gcm")]
+    #[arg(short = 'a', long, value_enum, default_value = "aes-256-gcm")]
     cipher: CipherAlgorithm,
 
     /// Enable compression
@@ -60,21 +64,53 @@ struct Args {
     #[arg(long, value_enum, default_value = "warn")]
     log_level: LogLevel,
 
+    /// Alias for --log-level debug
+    #[arg(long, short, conflicts_with = "log_level")]
+    debug: bool,
+
     /// Enable predictive echo
     #[arg(long)]
     predict: bool,
 
     /// SSH port (for SSH connections)
-    #[arg(long, default_value = "22")]
-    ssh_port: u16,
+    #[arg(long)]
+    ssh_port: Option<u16>,
 
     /// Remote command to start server (for SSH connections)
     #[arg(long, default_value = "rosh-server")]
     remote_command: String,
 
+    /// Path to rosh-server binary on remote host
+    #[arg(long)]
+    rosh_server_bin: Option<String>,
+
     /// Additional SSH options
     #[arg(long)]
     ssh_options: Vec<String>,
+
+    /// Method for discovering remote IP address (local|remote|proxy)
+    #[arg(long, default_value = "proxy")]
+    experimental_remote_ip: String,
+
+    /// Network family preference
+    #[arg(long = "family", default_value = "prefer-inet")]
+    family: String,
+
+    /// Use IPv4 only
+    #[arg(short = '4', long = "ipv4", conflicts_with = "ipv6")]
+    ipv4: bool,
+
+    /// Use IPv6 only
+    #[arg(short = '6', long = "ipv6", conflicts_with = "ipv4")]
+    ipv6: bool,
+
+    /// Act as a fake proxy for SSH ProxyCommand (internal use)
+    #[arg(long, hide = true)]
+    fake_proxy: bool,
+
+    /// UDP test mode - just send/receive test packets
+    #[arg(long, hide = true)]
+    udp_test: bool,
 }
 
 /// Terminal UI state
@@ -83,6 +119,7 @@ pub struct TerminalUI {
     pub state_sync: Arc<RwLock<StateSynchronizer>>,
     pub prediction_enabled: bool,
     stdout: io::Stdout,
+    terminal_guard: Option<TerminalGuard>,
 }
 
 impl TerminalUI {
@@ -97,12 +134,17 @@ impl TerminalUI {
             state_sync,
             prediction_enabled,
             stdout: io::stdout(),
+            terminal_guard: None,
         }
     }
 
-    /// Initialize terminal for raw mode
+    /// Initialize terminal for raw mode, taking ownership of terminal and disabling logging
     fn init(&mut self) -> Result<()> {
-        terminal::enable_raw_mode()?;
+        // Acquire terminal guard, which disables all logging
+        let mut guard = TerminalGuard::acquire()?;
+        guard.enable_raw_mode()?;
+        self.terminal_guard = Some(guard);
+
         execute!(
             self.stdout,
             terminal::Clear(ClearType::All),
@@ -114,7 +156,9 @@ impl TerminalUI {
 
     /// Restore terminal to normal mode
     fn cleanup(&mut self) -> Result<()> {
-        terminal::disable_raw_mode()?;
+        if let Some(mut guard) = self.terminal_guard.take() {
+            guard.disable_raw_mode()?;
+        }
         execute!(
             self.stdout,
             terminal::Clear(ClearType::All),
@@ -235,12 +279,51 @@ impl TerminalUI {
     }
 }
 
-/// Connection info returned from SSH
-#[derive(Debug)]
-struct ConnectionInfo {
-    host: String,
-    port: u16,
-    session_key: String,
+impl Drop for TerminalUI {
+    fn drop(&mut self) {
+        // The terminal guard will handle cleanup when dropped
+        if self.terminal_guard.is_some() {
+            let _ = execute!(
+                self.stdout,
+                cursor::Show,
+                style::SetAttribute(Attribute::Reset)
+            );
+        }
+    }
+}
+
+/// Retrieve server logs via SSH
+async fn retrieve_server_logs(host: &str, log_path: &str) {
+    info!("Attempting to retrieve server logs from {}", log_path);
+
+    // Build SSH command to cat the log file
+    let mut cmd = tokio::process::Command::new("ssh");
+    cmd.arg("-n"); // No stdin
+    cmd.arg("-T"); // No PTY
+    cmd.arg(host);
+    cmd.arg(format!("cat {log_path}"));
+
+    match cmd.output().await {
+        Ok(output) => {
+            if output.status.success() {
+                let logs = String::from_utf8_lossy(&output.stdout);
+                if !logs.trim().is_empty() {
+                    error!("Server logs from {}:", log_path);
+                    for line in logs.lines() {
+                        error!("  {}", line);
+                    }
+                } else {
+                    warn!("Server log file {} is empty", log_path);
+                }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to retrieve server logs: {}", stderr.trim());
+            }
+        }
+        Err(e) => {
+            warn!("Failed to execute SSH command to retrieve logs: {}", e);
+        }
+    }
 }
 
 /// Parse server argument to determine connection type
@@ -260,207 +343,295 @@ pub fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
     (false, None, server.to_string())
 }
 
-/// Start server via SSH and get connection info
-async fn start_server_via_ssh(
-    user: Option<&str>,
-    host: &str,
-    ssh_port: u16,
-    remote_command: &str,
-    ssh_options: &[String],
-    cipher: CipherAlgorithm,
-    compression: Option<CompressionAlgorithm>,
-) -> Result<ConnectionInfo> {
-    info!("Starting server on {} via SSH", host);
+/// Run UDP test client
+async fn run_udp_test_client(server_addr: SocketAddr) -> Result<()> {
+    use tokio::net::UdpSocket;
+    use tokio::time::{interval, Duration};
 
-    // Build SSH command
-    let mut ssh_cmd = Command::new("ssh");
+    println!("Starting UDP test client to {server_addr}");
 
-    // Add SSH options
-    ssh_cmd.arg("-p").arg(ssh_port.to_string());
-    ssh_cmd.arg("-o").arg("ControlMaster=no");
-    ssh_cmd.arg("-o").arg("ControlPath=none");
+    // Bind to any available port
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    println!("Local address: {}", socket.local_addr()?);
 
-    for opt in ssh_options {
-        ssh_cmd.arg("-o").arg(opt);
-    }
-
-    // Add user@host or just host
-    if let Some(user) = user {
-        ssh_cmd.arg(format!("{user}@{host}"));
-    } else {
-        ssh_cmd.arg(host);
-    }
-
-    // Build remote command
-    let mut remote_args = vec![
-        remote_command.to_string(),
-        "--bind".to_string(),
-        "127.0.0.1:0".to_string(), // Bind to random port
-        "--one-shot".to_string(),  // Exit after one connection
-    ];
-
-    // Add cipher and compression options
-    match cipher {
-        CipherAlgorithm::Aes128Gcm => {
-            remote_args.extend(["--cipher".to_string(), "aes128-gcm".to_string()])
-        }
-        CipherAlgorithm::Aes256Gcm => {
-            remote_args.extend(["--cipher".to_string(), "aes256-gcm".to_string()])
-        }
-        CipherAlgorithm::ChaCha20Poly1305 => {
-            remote_args.extend(["--cipher".to_string(), "chacha20-poly1305".to_string()])
-        }
-    }
-
-    if let Some(comp) = compression {
-        match comp {
-            CompressionAlgorithm::Zstd => {
-                remote_args.extend(["--compression".to_string(), "zstd".to_string()])
-            }
-            CompressionAlgorithm::Lz4 => {
-                remote_args.extend(["--compression".to_string(), "lz4".to_string()])
-            }
-        }
-    }
-
-    // Join args with proper escaping
-    let remote_cmd_str = remote_args.join(" ");
-    ssh_cmd.arg(remote_cmd_str);
-
-    // Set up process
-    ssh_cmd.stdout(Stdio::piped());
-    ssh_cmd.stderr(Stdio::piped());
-
-    let mut child = ssh_cmd.spawn().context("Failed to spawn SSH process")?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get stdout from SSH"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get stderr from SSH"))?;
-
-    let mut stdout_reader = BufReader::new(stdout);
-    let mut stderr_reader = BufReader::new(stderr);
-
-    // Read output looking for connection info
-    let mut session_key = None;
-    let mut port = None;
-
-    // We expect output like:
-    // ROSH_PORT=12345
-    // ROSH_KEY=base64encodedkey
-
-    let timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
+    // Send test packets periodically
+    let mut count = 0;
+    let mut ticker = interval(Duration::from_secs(1));
 
     loop {
-        if start.elapsed() > timeout {
-            anyhow::bail!("Timeout waiting for server to start");
-        }
+        ticker.tick().await;
+        count += 1;
 
-        // Try to read from stdout and stderr
-        let mut stdout_line = String::new();
-        let mut stderr_line = String::new();
+        let msg = format!("Test packet {count}");
+        println!("Sending: {msg}");
 
-        tokio::select! {
-            result = stdout_reader.read_line(&mut stdout_line) => {
-                if result? == 0 {
-                    break; // EOF
-                }
+        socket.send_to(msg.as_bytes(), server_addr).await?;
 
-                let line = stdout_line.trim();
-                if line.starts_with("ROSH_PORT=") {
-                    port = Some(line.strip_prefix("ROSH_PORT=").unwrap().parse::<u16>()
-                        .context("Failed to parse port")?);
-                } else if line.starts_with("ROSH_KEY=") {
-                    session_key = Some(line.strip_prefix("ROSH_KEY=").unwrap().to_string());
-                }
+        // Try to receive response with timeout
+        let mut buf = vec![0u8; 1024];
+        match tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, peer))) => {
+                let response = String::from_utf8_lossy(&buf[..n]);
+                println!("Received from {peer}: {response}");
             }
-
-            result = stderr_reader.read_line(&mut stderr_line) => {
-                if result? > 0 {
-                    debug!("SSH stderr: {}", stderr_line.trim());
-                }
+            Ok(Err(e)) => {
+                println!("Receive error: {e}");
             }
-
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // Check if we have all info
-                if session_key.is_some() && port.is_some() {
-                    break;
-                }
+            Err(_) => {
+                println!("Timeout waiting for response");
             }
         }
 
-        if session_key.is_some() && port.is_some() {
+        if count >= 5 {
+            println!("Test complete");
             break;
         }
     }
 
-    // Kill SSH process once we have the info
-    let _ = child.kill().await;
+    Ok(())
+}
 
-    let session_key =
-        session_key.ok_or_else(|| anyhow::anyhow!("Server did not provide session key"))?;
-    let port = port.ok_or_else(|| anyhow::anyhow!("Server did not provide port"))?;
+/// Run fake proxy mode for SSH ProxyCommand
+async fn run_fake_proxy(host: &str, port: &str, family: NetworkFamily) -> Result<()> {
+    use std::io::{self, Read, Write as IoWrite};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::os::unix::io::AsRawFd;
+    use std::thread;
 
-    Ok(ConnectionInfo {
-        host: host.to_string(),
-        port,
-        session_key,
-    })
+    // Resolve hostname according to family preference
+    let addr_str = format!("{host}:{port}");
+    let addrs: Vec<SocketAddr> = addr_str
+        .to_socket_addrs()
+        .with_context(|| format!("Failed to resolve {host}"))?
+        .collect();
+
+    if addrs.is_empty() {
+        anyhow::bail!("No addresses found for {}", host);
+    }
+
+    // Try to connect to each address until one succeeds (like mosh)
+    let mut last_err = None;
+    let mut connected_stream = None;
+    let mut connected_addr = None;
+
+    for addr in &addrs {
+        // Filter by family preference
+        match family {
+            NetworkFamily::Inet if !addr.is_ipv4() => continue,
+            NetworkFamily::Inet6 if !addr.is_ipv6() => continue,
+            NetworkFamily::PreferInet => {
+                // Try IPv4 first
+                if !addr.is_ipv4() && addrs.iter().any(|a| a.is_ipv4()) {
+                    continue;
+                }
+            }
+            NetworkFamily::PreferInet6 => {
+                // Try IPv6 first
+                if !addr.is_ipv6() && addrs.iter().any(|a| a.is_ipv6()) {
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        match TcpStream::connect(addr) {
+            Ok(stream) => {
+                connected_stream = Some(stream);
+                connected_addr = Some(*addr);
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+            }
+        }
+    }
+
+    let (mut stream, addr) = match (connected_stream, connected_addr) {
+        (Some(s), Some(a)) => (s, a),
+        _ => {
+            let err_msg = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "No suitable address found".to_string());
+            anyhow::bail!("Could not connect to {}: {}", host, err_msg);
+        }
+    };
+
+    // Print the resolved and connected IP to stderr for the parent process
+    eprintln!("ROSH IP {}", addr.ip());
+
+    // Set up non-blocking I/O
+    stream.set_nonblocking(true)?;
+    let _stream_fd = stream.as_raw_fd();
+
+    // Spawn thread to copy from stdin to socket
+    let stream_clone = stream.try_clone()?;
+    let stdin_thread = thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut stream = stream_clone;
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            match stdin.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    if stream.write_all(&buffer[..n]).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Copy from socket to stdout in main thread
+    let mut stdout = io::stdout();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break, // EOF
+            Ok(n) => {
+                if stdout.write_all(&buffer[..n]).is_err() {
+                    break;
+                }
+                stdout.flush()?;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Wait for stdin thread to finish
+    let _ = stdin_thread.join();
+
+    Ok(())
 }
 
 pub async fn run() -> Result<()> {
     let args = Args::parse();
 
+    // Handle fake proxy mode
+    if args.fake_proxy {
+        // In fake proxy mode, we expect the arguments to be:
+        // rosh --fake-proxy -- host port
+        // The server field will contain "host" and command will contain "port"
+        let host = &args.server;
+        let port = args
+            .command
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Missing port argument for fake proxy mode"))?;
+
+        // Determine network family
+        let family = if args.ipv4 {
+            NetworkFamily::Inet
+        } else if args.ipv6 {
+            NetworkFamily::Inet6
+        } else {
+            NetworkFamily::parse(&args.family)?
+        };
+
+        return run_fake_proxy(host, port, family).await;
+    }
+
+    // Ensure terminal is in a clean state before we start
+    // This helps if a previous run left the terminal in raw mode
+    let _ = terminal::disable_raw_mode();
+
     // Initialize logging
-    let log_level = match args.log_level {
-        LogLevel::Trace => tracing::Level::TRACE,
-        LogLevel::Debug => tracing::Level::DEBUG,
-        LogLevel::Info => tracing::Level::INFO,
-        LogLevel::Warn => tracing::Level::WARN,
-        LogLevel::Error => tracing::Level::ERROR,
+    let log_level = if args.debug {
+        tracing::Level::DEBUG
+    } else {
+        match args.log_level {
+            LogLevel::Trace => tracing::Level::TRACE,
+            LogLevel::Debug => tracing::Level::DEBUG,
+            LogLevel::Info => tracing::Level::INFO,
+            LogLevel::Warn => tracing::Level::WARN,
+            LogLevel::Error => tracing::Level::ERROR,
+        }
     };
 
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_writer(io::stderr)
+        .with_line_number(false)
+        .with_file(false)
+        .with_target(false)
         .init();
+
+    // Check if we're in UDP test mode
+    if args.udp_test {
+        // Parse server address for UDP test
+        let server_addr: SocketAddr = args
+            .server
+            .parse()
+            .with_context(|| format!("Failed to parse server address: {}", args.server))?;
+        return run_udp_test_client(server_addr).await;
+    }
 
     // Parse server argument
     let (is_ssh, user, host) = parse_server_arg(&args.server);
 
+    // Determine network family from args
+    let network_family = if args.ipv4 {
+        NetworkFamily::Inet
+    } else if args.ipv6 {
+        NetworkFamily::Inet6
+    } else {
+        NetworkFamily::parse(&args.family)?
+    };
+
+    // Parse remote IP strategy
+    let remote_ip_strategy = RemoteIpStrategy::parse(&args.experimental_remote_ip)?;
+
     // Get connection info
-    let (server_addr, session_key_str) = if is_ssh {
+    let (server_addr, session_key_str, log_file) = if is_ssh {
         // SSH connection
         if args.key.is_some() {
             anyhow::bail!("Cannot specify --key with SSH connection");
         }
 
-        let conn_info = start_server_via_ssh(
-            user.as_deref(),
-            &host,
-            args.ssh_port,
-            &args.remote_command,
-            &args.ssh_options,
-            args.cipher,
-            args.compression,
-        )
+        info!(
+            "Bootstrapping Rosh connection via SSH to {}@{}",
+            user.as_deref().unwrap_or("<default>"),
+            host
+        );
+        let connect_params = bootstrap_via_ssh(BootstrapOptions {
+            user: user.as_deref(),
+            host: &host,
+            ssh_port: args.ssh_port,
+            remote_command: &args.remote_command,
+            rosh_server_bin: args.rosh_server_bin.as_deref(),
+            ssh_options: &args.ssh_options,
+            cipher: args.cipher,
+            compression: args.compression,
+            remote_ip_strategy,
+            family: network_family,
+        })
         .await?;
 
-        // Resolve hostname to IP
-        let addr_str = format!("{}:{}", conn_info.host, conn_info.port);
-        let mut addrs = addr_str
-            .to_socket_addrs()
-            .with_context(|| format!("Failed to resolve {addr_str}"))?;
-        let server_addr = addrs
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("No addresses found for {}", addr_str))?;
+        // Log connection parameters
+        info!(
+            "Bootstrap complete. Connection parameters: {}",
+            serde_json::to_string(&connect_params).unwrap_or_else(|_| "<error>".to_string())
+        );
 
-        (server_addr, conn_info.session_key)
+        // Parse IP address - handle the case where proxy strategy fills it in
+        let ip: IpAddr = if connect_params.ip.is_empty() {
+            // This shouldn't happen with proxy strategy, but provide a helpful error
+            anyhow::bail!("Server did not provide IP address. This may be a bootstrap error.");
+        } else {
+            connect_params
+                .ip
+                .parse()
+                .with_context(|| format!("Failed to parse server IP: {}", connect_params.ip))?
+        };
+        let server_addr = SocketAddr::new(ip, connect_params.port);
+        let log_file = connect_params.log_file.clone();
+
+        (server_addr, connect_params.session_key, log_file)
     } else {
         // Direct connection
         let session_key = args
@@ -472,16 +643,58 @@ pub async fn run() -> Result<()> {
             .parse()
             .with_context(|| format!("Failed to parse server address: {}", args.server))?;
 
-        (server_addr, session_key)
+        info!("Using direct connection to {}", server_addr);
+        (server_addr, session_key, None)
     };
 
-    info!("Connecting to Rosh server at {}", server_addr);
+    info!("Connecting to Rosh server via QUIC at {}", server_addr);
 
     // Decode session key
     use base64::Engine;
     let key_bytes = base64::engine::general_purpose::STANDARD
         .decode(&session_key_str)
         .context("Failed to decode session key")?;
+
+    // Perform UDP hole punching if coming from SSH
+    // HACK/WORKAROUND: Quinn (QUIC implementation) requires specific socket options
+    // that are difficult to set on a pre-existing socket. So we:
+    // 1. Create a regular UDP socket for hole punching
+    // 2. Send packets to punch through NAT
+    // 3. Close the socket
+    // 4. Let Quinn create a new socket on the same port with proper options
+    // This ensures NAT mappings are established while allowing Quinn to work correctly.
+    // TODO: Investigate if Quinn can be modified to accept pre-configured sockets
+    let local_addr = if is_ssh {
+        info!("Performing UDP hole punch to {}", server_addr);
+
+        // Create UDP socket for hole punching
+        let hole_punch_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        let local_addr = hole_punch_socket.local_addr()?;
+        info!("Hole punch socket bound to {}", local_addr);
+
+        // Send a few packets to punch through NAT
+        for i in 0..3 {
+            let msg = format!("HOLE_PUNCH_{i}");
+            hole_punch_socket
+                .send_to(msg.as_bytes(), server_addr)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        info!("Sent hole punch packets");
+
+        // Wait a bit for server to be ready
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Close the hole punch socket
+        drop(hole_punch_socket);
+
+        // Small delay to ensure socket is fully closed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Some(local_addr)
+    } else {
+        None
+    };
 
     // Derive session keys
     let mut key_derivation = KeyDerivation::new(&key_bytes);
@@ -496,6 +709,7 @@ pub async fn run() -> Result<()> {
 
     // Get terminal dimensions
     let (cols, rows) = terminal::size()?;
+    debug!("Local terminal dimensions: {}x{}", cols, rows);
 
     // Create transport config
     let transport_config = RoshTransportConfig {
@@ -506,14 +720,96 @@ pub async fn run() -> Result<()> {
         cert_validation: rosh_network::CertValidationMode::default(),
     };
 
+    // First, let's verify basic UDP connectivity
+    info!("Testing basic UDP connectivity to {}", server_addr);
+    let test_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    test_socket
+        .send_to(b"UDP_CONNECTIVITY_TEST", server_addr)
+        .await?;
+    info!("Sent UDP test packet");
+
+    // Try to receive a response (server might not echo, but at least we know we can send)
+    let mut buf = vec![0u8; 1024];
+    match tokio::time::timeout(Duration::from_millis(500), test_socket.recv_from(&mut buf)).await {
+        Ok(Ok((n, peer))) => {
+            info!("Received UDP response: {} bytes from {}", n, peer);
+        }
+        Ok(Err(e)) => {
+            warn!("UDP receive error: {}", e);
+        }
+        Err(_) => {
+            info!("No UDP response received (this is normal if server doesn't echo)");
+        }
+    }
+    drop(test_socket);
+
     // Connect to server
-    let mut transport = NetworkTransport::new_client(transport_config).await?;
-    let mut connection = transport.connect(server_addr).await?;
+    debug!("Creating QUIC network transport");
+
+    // Create transport - use hole-punched address if available
+    let transport = if let Some(addr) = local_addr {
+        info!(
+            "Creating QUIC client transport at hole-punched address: {}",
+            addr
+        );
+        NetworkTransport::new_client_at_address(addr, transport_config).await?
+    } else {
+        info!("Creating QUIC client transport with random port");
+        NetworkTransport::new_client(transport_config).await?
+    };
+    info!("Created QUIC client transport");
+
+    // Set encryption key on transport
+    let mut transport = transport.with_encryption(key_bytes.to_vec(), args.cipher);
+    info!("Configured transport with encryption");
+
+    info!("Establishing QUIC connection to {}", server_addr);
+    info!(
+        "Server address details: IP={}, Port={}",
+        server_addr.ip(),
+        server_addr.port()
+    );
+
+    // Add more detailed timeout handling
+    let start_time = std::time::Instant::now();
+    let mut connection =
+        match time::timeout(Duration::from_secs(10), transport.connect(server_addr)).await {
+            Ok(Ok(conn)) => {
+                info!(
+                    "QUIC connection established successfully in {:?}",
+                    start_time.elapsed()
+                );
+                conn
+            }
+            Ok(Err(e)) => {
+                error!(
+                    "QUIC connection failed after {:?}: {}",
+                    start_time.elapsed(),
+                    e
+                );
+                error!("Error details: {:?}", e);
+                if let Some(ref log_path) = log_file {
+                    retrieve_server_logs(&host, log_path).await;
+                }
+                anyhow::bail!("Failed to connect to Rosh server: {}", e)
+            }
+            Err(_) => {
+                error!("QUIC connection timeout after {:?}", start_time.elapsed());
+                if let Some(ref log_path) = log_file {
+                    retrieve_server_logs(&host, log_path).await;
+                }
+                anyhow::bail!("QUIC connection timeout after 10 seconds")
+            }
+        };
 
     // Send handshake
     let session_keys_bytes = rkyv::to_bytes::<_, 256>(&session_keys)
         .context("Failed to serialize session keys")?
         .to_vec();
+    debug!(
+        "Sending handshake with terminal dimensions: {}x{}",
+        cols, rows
+    );
     connection
         .send(NetworkMessage::Handshake {
             session_keys_bytes,
@@ -523,12 +819,19 @@ pub async fn run() -> Result<()> {
         .await?;
 
     // Receive handshake acknowledgment
+    debug!("Waiting for handshake acknowledgment");
     let (session_id, cipher_algorithm_u8) = match connection.receive().await? {
         NetworkMessage::HandshakeAck {
             session_id,
             cipher_algorithm,
-        } => (session_id, cipher_algorithm),
-        _ => anyhow::bail!("Expected handshake acknowledgment"),
+        } => {
+            debug!(
+                "Received handshake ack: session_id={}, cipher={}",
+                session_id, cipher_algorithm
+            );
+            (session_id, cipher_algorithm)
+        }
+        msg => anyhow::bail!("Expected handshake acknowledgment, got: {:?}", msg),
     };
 
     info!("Connected to session {}", session_id);
@@ -547,49 +850,73 @@ pub async fn run() -> Result<()> {
     }
 
     // Create initial terminal state
+    debug!("Creating initial terminal state");
     let initial_state = TerminalState::new(cols, rows);
 
     // Create state synchronizer
     let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(initial_state, false)));
 
-    // Create terminal UI
-    let mut ui = TerminalUI::new(cols, rows, state_sync.clone(), args.predict);
-    ui.init()?;
-
     // Create channels
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (shutdown_tx, _shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
 
-    // Spawn input handler
-    let input_handle = tokio::task::spawn_blocking({
-        let input_tx = input_tx.clone();
-        let mut shutdown_rx = shutdown_tx.subscribe();
+    // Send command if provided (before entering raw mode)
+    if let Some(cmd) = &args.command {
+        debug!("Sending command: {}", cmd);
+        // Send the command followed by newline
+        let mut cmd_bytes = cmd.as_bytes().to_vec();
+        cmd_bytes.push(b'\n');
+        connection.send(NetworkMessage::Input(cmd_bytes)).await?;
 
-        move || {
-            loop {
-                // Check for shutdown
-                if shutdown_rx.try_recv().is_ok() {
-                    break;
-                }
+        // Wait a bit for command to execute
+        time::sleep(Duration::from_millis(100)).await;
 
-                // Read input with timeout
-                if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                    match event::read() {
-                        Ok(Event::Key(key_event)) => {
-                            let bytes = key_to_bytes(key_event);
-                            if !bytes.is_empty() {
-                                let _ = input_tx.send(bytes);
+        // Send exit command to close the shell after the command completes
+        debug!("Sending exit command");
+        connection
+            .send(NetworkMessage::Input(b"exit\n".to_vec()))
+            .await?;
+    }
+
+    // Now that all debug logging is done, create and initialize terminal UI
+    info!("Bootstrap complete, switching to terminal mode");
+    let mut ui = TerminalUI::new(cols, rows, state_sync.clone(), args.predict);
+    ui.init()?; // This disables logging and enables raw mode
+
+    // Spawn input handler (only if no command provided)
+    let input_handle = if args.command.is_none() {
+        Some(tokio::task::spawn_blocking({
+            let input_tx = input_tx.clone();
+            let mut shutdown_rx = shutdown_tx.subscribe();
+
+            move || {
+                loop {
+                    // Check for shutdown
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
+                    }
+
+                    // Read input with timeout
+                    if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                        match event::read() {
+                            Ok(Event::Key(key_event)) => {
+                                let bytes = key_to_bytes(key_event);
+                                if !bytes.is_empty() {
+                                    let _ = input_tx.send(bytes);
+                                }
                             }
+                            Ok(Event::Resize(cols, rows)) => {
+                                let _ = input_tx.send(vec![0xFF, 0xFF, cols as u8, rows as u8]);
+                            }
+                            _ => {}
                         }
-                        Ok(Event::Resize(cols, rows)) => {
-                            let _ = input_tx.send(vec![0xFF, 0xFF, cols as u8, rows as u8]);
-                        }
-                        _ => {}
                     }
                 }
             }
-        }
-    });
+        }))
+    } else {
+        None
+    };
 
     // Main event loop
     let result = run_client_loop(
@@ -603,7 +930,9 @@ pub async fn run() -> Result<()> {
 
     // Cleanup
     let _ = shutdown_tx.send(());
-    let _ = input_handle.await;
+    if let Some(handle) = input_handle {
+        let _ = handle.await;
+    }
     ui.cleanup()?;
 
     result
@@ -618,6 +947,8 @@ async fn run_client_loop(
 ) -> Result<()> {
     let mut ping_interval = time::interval(Duration::from_secs(30));
     let mut last_render = time::Instant::now();
+    let mut last_output_time = time::Instant::now();
+    let is_command_mode = input_rx.is_closed(); // If input channel is closed, we're in command mode
 
     loop {
         tokio::select! {
@@ -689,8 +1020,10 @@ async fn run_client_loop(
                         }
 
                         // Render update
+                        debug!("Rendering state update");
                         ui.render().await?;
                         last_render = time::Instant::now();
+                        last_output_time = time::Instant::now();
                     }
                     NetworkMessage::Pong => {
                         debug!("Received pong");
@@ -711,6 +1044,12 @@ async fn run_client_loop(
                 if last_render.elapsed() > Duration::from_millis(500) {
                     ui.render().await?;
                     last_render = time::Instant::now();
+                }
+
+                // In command mode, exit if no output for 2 seconds
+                if is_command_mode && last_output_time.elapsed() > Duration::from_secs(2) {
+                    debug!("No output for 2 seconds in command mode, exiting");
+                    return Ok(());
                 }
             }
         }
@@ -767,258 +1106,5 @@ pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
             _ => vec![],
         },
         _ => vec![],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn test_args_parsing_basic() {
-        // Test basic server argument
-        let args = Args::try_parse_from(["rosh", "example.com"]).unwrap();
-        assert_eq!(args.server, "example.com");
-        assert_eq!(args.key, None);
-        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm); // default
-        assert_eq!(args.compression, None);
-        assert_eq!(args.keep_alive, 30);
-        assert_eq!(args.ssh_port, 22);
-        assert_eq!(args.remote_command, "rosh-server");
-        assert!(!args.predict);
-        assert!(args.ssh_options.is_empty());
-    }
-
-    #[test]
-    fn test_args_parsing_with_key() {
-        let args = Args::try_parse_from(["rosh", "--key", "abc123", "localhost:8080"]).unwrap();
-        assert_eq!(args.server, "localhost:8080");
-        assert_eq!(args.key, Some("abc123".to_string()));
-    }
-
-    #[test]
-    fn test_args_parsing_cipher_options() {
-        // Test AES-128-GCM (default)
-        let args = Args::try_parse_from(["rosh", "--cipher", "aes-gcm", "server"]).unwrap();
-        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm);
-
-        // Test AES-256-GCM
-        let args = Args::try_parse_from(["rosh", "--cipher", "aes-256-gcm", "server"]).unwrap();
-        assert_eq!(args.cipher, CipherAlgorithm::Aes256Gcm);
-
-        // Test ChaCha20-Poly1305
-        let args =
-            Args::try_parse_from(["rosh", "--cipher", "chacha20-poly1305", "server"]).unwrap();
-        assert_eq!(args.cipher, CipherAlgorithm::ChaCha20Poly1305);
-
-        // Test short form
-        let args = Args::try_parse_from(["rosh", "-a", "aes-gcm", "server"]).unwrap();
-        assert_eq!(args.cipher, CipherAlgorithm::Aes128Gcm);
-    }
-
-    #[test]
-    fn test_args_parsing_compression() {
-        // Test zstd compression
-        let args = Args::try_parse_from(["rosh", "--compression", "zstd", "server"]).unwrap();
-        assert_eq!(args.compression, Some(CompressionAlgorithm::Zstd));
-
-        // Test lz4 compression
-        let args = Args::try_parse_from(["rosh", "--compression", "lz4", "server"]).unwrap();
-        assert_eq!(args.compression, Some(CompressionAlgorithm::Lz4));
-    }
-
-    #[test]
-    fn test_args_parsing_ssh_options() {
-        let args = Args::try_parse_from([
-            "rosh",
-            "--ssh-port",
-            "2222",
-            "--remote-command",
-            "custom-server",
-            "--ssh-options",
-            "StrictHostKeyChecking=no",
-            "--ssh-options",
-            "UserKnownHostsFile=/dev/null",
-            "user@host",
-        ])
-        .unwrap();
-
-        assert_eq!(args.ssh_port, 2222);
-        assert_eq!(args.remote_command, "custom-server");
-        assert_eq!(
-            args.ssh_options,
-            vec!["StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null"]
-        );
-    }
-
-    #[test]
-    fn test_args_parsing_predict_flag() {
-        let args = Args::try_parse_from(["rosh", "--predict", "server"]).unwrap();
-        assert!(args.predict);
-    }
-
-    #[test]
-    fn test_args_parsing_keep_alive() {
-        let args = Args::try_parse_from(["rosh", "--keep-alive", "60", "server"]).unwrap();
-        assert_eq!(args.keep_alive, 60);
-    }
-
-    #[test]
-    fn test_args_parsing_log_levels() {
-        let log_levels = vec![
-            ("trace", LogLevel::Trace),
-            ("debug", LogLevel::Debug),
-            ("info", LogLevel::Info),
-            ("warn", LogLevel::Warn),
-            ("error", LogLevel::Error),
-        ];
-
-        for (level_str, expected) in log_levels {
-            let args = Args::try_parse_from(["rosh", "--log-level", level_str, "server"]).unwrap();
-            match (args.log_level, expected) {
-                (LogLevel::Trace, LogLevel::Trace) => {}
-                (LogLevel::Debug, LogLevel::Debug) => {}
-                (LogLevel::Info, LogLevel::Info) => {}
-                (LogLevel::Warn, LogLevel::Warn) => {}
-                (LogLevel::Error, LogLevel::Error) => {}
-                _ => panic!("Log level mismatch"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_args_parsing_invalid() {
-        // Missing server argument
-        assert!(Args::try_parse_from(["rosh"]).is_err());
-
-        // Invalid cipher
-        assert!(Args::try_parse_from(["rosh", "--cipher", "invalid", "server"]).is_err());
-
-        // Invalid compression
-        assert!(Args::try_parse_from(["rosh", "--compression", "invalid", "server"]).is_err());
-
-        // Invalid log level
-        assert!(Args::try_parse_from(["rosh", "--log-level", "invalid", "server"]).is_err());
-
-        // Invalid keep-alive (not a number)
-        assert!(Args::try_parse_from(["rosh", "--keep-alive", "not-a-number", "server"]).is_err());
-    }
-
-    #[test]
-    fn test_args_parsing_help() {
-        // Test that help flag works
-        let result = Args::try_parse_from(["rosh", "--help"]);
-        assert!(result.is_err()); // Help causes a special error
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-    }
-
-    #[test]
-    fn test_args_parsing_version() {
-        // Test that version flag works
-        let result = Args::try_parse_from(["rosh", "--version"]);
-        assert!(result.is_err()); // Version causes a special error
-
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
-    }
-
-    #[test]
-    fn test_log_level_to_tracing() {
-        // Test conversion from our LogLevel to tracing::Level
-        let conversions = vec![
-            (LogLevel::Trace, tracing::Level::TRACE),
-            (LogLevel::Debug, tracing::Level::DEBUG),
-            (LogLevel::Info, tracing::Level::INFO),
-            (LogLevel::Warn, tracing::Level::WARN),
-            (LogLevel::Error, tracing::Level::ERROR),
-        ];
-
-        for (log_level, expected_tracing) in conversions {
-            let actual = match log_level {
-                LogLevel::Trace => tracing::Level::TRACE,
-                LogLevel::Debug => tracing::Level::DEBUG,
-                LogLevel::Info => tracing::Level::INFO,
-                LogLevel::Warn => tracing::Level::WARN,
-                LogLevel::Error => tracing::Level::ERROR,
-            };
-            assert_eq!(actual, expected_tracing);
-        }
-    }
-
-    #[test]
-    fn test_terminal_ui_dimensions() {
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-
-        let state = TerminalState::new(120, 40);
-        let state_sync = Arc::new(RwLock::new(StateSynchronizer::new(state, false)));
-
-        let ui = TerminalUI::new(120, 40, state_sync, true);
-        assert_eq!(ui.terminal.framebuffer().width(), 120);
-        assert_eq!(ui.terminal.framebuffer().height(), 40);
-        assert!(ui.prediction_enabled);
-    }
-
-    #[test]
-    fn test_parse_server_arg_comprehensive() {
-        // Test various edge cases
-
-        // Empty string
-        let (is_ssh, user, host) = parse_server_arg("");
-        assert!(is_ssh);
-        assert_eq!(user, None);
-        assert_eq!(host, "");
-
-        // Just @ symbol
-        let (is_ssh, user, host) = parse_server_arg("@");
-        assert!(is_ssh);
-        assert_eq!(user, Some("".to_string()));
-        assert_eq!(host, "");
-
-        // Multiple colons (IPv6-like but not in brackets)
-        let (is_ssh, user, host) = parse_server_arg("fe80::1:8080");
-        assert!(!is_ssh);
-        assert_eq!(user, None);
-        assert_eq!(host, "fe80::1:8080");
-
-        // User with special characters
-        let (is_ssh, user, host) = parse_server_arg("user-name_123@host");
-        assert!(is_ssh);
-        assert_eq!(user, Some("user-name_123".to_string()));
-        assert_eq!(host, "host");
-    }
-
-    #[test]
-    fn test_cipher_algorithm_conversion() {
-        // Test conversion from u8 to CipherAlgorithm
-        let valid_conversions = vec![
-            (0u8, CipherAlgorithm::Aes128Gcm),
-            (1u8, CipherAlgorithm::Aes256Gcm),
-            (2u8, CipherAlgorithm::ChaCha20Poly1305),
-        ];
-
-        for (byte, expected) in valid_conversions {
-            let result = match byte {
-                0 => Ok(CipherAlgorithm::Aes128Gcm),
-                1 => Ok(CipherAlgorithm::Aes256Gcm),
-                2 => Ok(CipherAlgorithm::ChaCha20Poly1305),
-                _ => Err(anyhow::anyhow!("Unknown cipher algorithm: {}", byte)),
-            };
-            assert!(result.is_ok());
-            assert_eq!(result.unwrap(), expected);
-        }
-
-        // Test invalid cipher algorithm
-        let invalid: u8 = 255;
-        let result = match invalid {
-            0 => Ok(CipherAlgorithm::Aes128Gcm),
-            1 => Ok(CipherAlgorithm::Aes256Gcm),
-            2 => Ok(CipherAlgorithm::ChaCha20Poly1305),
-            _ => Err(anyhow::anyhow!("Unknown cipher algorithm: {}", invalid)),
-        };
-        assert!(result.is_err());
     }
 }

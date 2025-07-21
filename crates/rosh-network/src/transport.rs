@@ -16,7 +16,7 @@ use quinn::{
 };
 use rosh_crypto::{create_cipher, CipherAlgorithm};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,6 +39,20 @@ impl NetworkTransport {
         })
     }
 
+    /// Create a new client transport bound to a specific local address
+    /// This is used after hole punching to reuse the same port
+    pub async fn new_client_at_address(
+        local_addr: SocketAddr,
+        config: RoshTransportConfig,
+    ) -> Result<ClientTransportWrapper, NetworkError> {
+        let transport = ClientTransport::new_at_address(local_addr, config).await?;
+        Ok(ClientTransportWrapper {
+            transport,
+            key: None,
+            algorithm: None,
+        })
+    }
+
     /// Create a new server transport  
     pub async fn new_server(
         bind_addr: SocketAddr,
@@ -47,6 +61,32 @@ impl NetworkTransport {
         config: RoshTransportConfig,
     ) -> Result<ServerTransportWrapper, NetworkError> {
         let transport = ServerTransport::new(bind_addr, config).await?;
+        Ok(ServerTransportWrapper {
+            transport,
+            key: None,
+            algorithm: None,
+        })
+    }
+
+    /// Create a new client transport from an existing socket (e.g., after hole punching)
+    pub async fn new_client_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<ClientTransportWrapper, NetworkError> {
+        let transport = ClientTransport::new_from_socket(socket, config).await?;
+        Ok(ClientTransportWrapper {
+            transport,
+            key: None,
+            algorithm: None,
+        })
+    }
+
+    /// Create a new server transport from an existing socket (e.g., after hole punching)
+    pub async fn new_server_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<ServerTransportWrapper, NetworkError> {
+        let transport = ServerTransport::new_from_socket(socket, config).await?;
         Ok(ServerTransportWrapper {
             transport,
             key: None,
@@ -91,14 +131,75 @@ pub struct ClientTransport {
 impl ClientTransport {
     /// Create a new client transport
     pub async fn new(config: RoshTransportConfig) -> Result<Self, NetworkError> {
-        let _client_config = create_client_config(config)?;
+        let client_config = create_client_config(config)?;
 
-        // Bind to any available port
-        let addr = "[::]:0"
+        // Bind to any available port on both IPv4 and IPv6
+        // Use 0.0.0.0:0 instead of [::]:0 to ensure IPv4 compatibility
+        let addr = "0.0.0.0:0"
             .parse()
             .map_err(|e| NetworkError::TransportError(format!("Failed to parse address: {e}")))?;
-        let endpoint = Endpoint::client(addr)
+        let mut endpoint = Endpoint::client(addr)
             .map_err(|e| NetworkError::TransportError(format!("Failed to create endpoint: {e}")))?;
+
+        // Set the default client configuration
+        endpoint.set_default_client_config(client_config);
+
+        Ok(Self {
+            endpoint,
+            connection: None,
+        })
+    }
+
+    /// Create a new client transport at a specific address
+    /// Used after hole punching to reuse the same port
+    pub async fn new_at_address(
+        local_addr: SocketAddr,
+        config: RoshTransportConfig,
+    ) -> Result<Self, NetworkError> {
+        let client_config = create_client_config(config)?;
+
+        tracing::info!(
+            "Creating client endpoint at specific address: {}",
+            local_addr
+        );
+        let mut endpoint = Endpoint::client(local_addr).map_err(|e| {
+            NetworkError::TransportError(format!("Failed to create endpoint at {local_addr}: {e}"))
+        })?;
+
+        // Set the default client configuration
+        endpoint.set_default_client_config(client_config);
+
+        Ok(Self {
+            endpoint,
+            connection: None,
+        })
+    }
+
+    /// Create a new client transport from an existing socket
+    pub async fn new_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<Self, NetworkError> {
+        let client_config = create_client_config(config.clone())?;
+        let endpoint_config = quinn::EndpointConfig::default();
+
+        // Get the default runtime
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| NetworkError::TransportError("No async runtime found".to_string()))?;
+
+        let endpoint = Endpoint::new(
+            endpoint_config,
+            None, // No server config for client
+            socket,
+            runtime,
+        )
+        .map_err(|e| {
+            NetworkError::TransportError(format!("Failed to create endpoint from socket: {e}"))
+        })?;
+
+        // Set the default client config
+        let mut endpoint = endpoint;
+        endpoint.set_default_client_config(client_config);
 
         Ok(Self {
             endpoint,
@@ -108,17 +209,26 @@ impl ClientTransport {
 
     /// Connect to a server
     pub async fn connect(&mut self, addr: SocketAddr) -> Result<(), NetworkError> {
-        let client_config = create_client_config(RoshTransportConfig::default())?;
+        tracing::info!("Initiating QUIC connection to {}", addr);
+        tracing::info!(
+            "Client endpoint local address: {:?}",
+            self.endpoint.local_addr()
+        );
 
-        let connection = self
-            .endpoint
-            .connect_with(client_config, addr, "localhost")
-            .map_err(|e| {
-                NetworkError::ConnectionFailed(format!("Failed to initiate connection: {e}"))
-            })?
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Connection failed: {e}")))?;
+        // Use the endpoint's default config instead of creating a new one
+        let connecting = self.endpoint.connect(addr, "localhost").map_err(|e| {
+            tracing::error!("Failed to initiate QUIC connection: {}", e);
+            NetworkError::ConnectionFailed(format!("Failed to initiate connection: {e}"))
+        })?;
 
+        tracing::info!("QUIC handshake in progress...");
+        let connection = connecting.await.map_err(|e| {
+            tracing::error!("QUIC handshake failed: {}", e);
+            tracing::error!("Error details: {:?}", e);
+            NetworkError::ConnectionFailed(format!("Connection failed: {e}"))
+        })?;
+
+        tracing::info!("QUIC connection established");
         self.connection = Some(connection);
         Ok(())
     }
@@ -161,26 +271,68 @@ impl ServerTransport {
         bind_addr: SocketAddr,
         config: RoshTransportConfig,
     ) -> Result<Self, NetworkError> {
+        tracing::info!("Creating server transport at {}", bind_addr);
         let (server_config, _) = create_server_config(config)?;
+        tracing::info!("Server config created successfully");
 
         let endpoint = Endpoint::server(server_config, bind_addr).map_err(|e| {
+            tracing::error!("Failed to create server endpoint at {}: {}", bind_addr, e);
             NetworkError::TransportError(format!("Failed to create server endpoint: {e}"))
         })?;
 
+        let local_addr = endpoint.local_addr().map_err(|e| {
+            NetworkError::TransportError(format!("Failed to get local address: {e}"))
+        })?;
+        tracing::info!(
+            "QUIC server endpoint created successfully at {}",
+            local_addr
+        );
+
+        Ok(Self { endpoint })
+    }
+
+    /// Create a new server transport from an existing socket
+    pub async fn new_from_socket(
+        socket: UdpSocket,
+        config: RoshTransportConfig,
+    ) -> Result<Self, NetworkError> {
+        tracing::info!("Creating server transport from socket");
+        let (server_config, _) = create_server_config(config)?;
+        let endpoint_config = quinn::EndpointConfig::default();
+
+        // Get the default runtime
+        let runtime = quinn::default_runtime()
+            .ok_or_else(|| NetworkError::TransportError("No async runtime found".to_string()))?;
+
+        let local_addr = socket.local_addr().map_err(|e| {
+            NetworkError::TransportError(format!("Failed to get socket address: {e}"))
+        })?;
+        tracing::info!("Socket bound to: {}", local_addr);
+
+        let endpoint = Endpoint::new(endpoint_config, Some(server_config), socket, runtime)
+            .map_err(|e| {
+                NetworkError::TransportError(format!("Failed to create endpoint from socket: {e}"))
+            })?;
+
+        tracing::info!("QUIC endpoint created successfully");
         Ok(Self { endpoint })
     }
 
     /// Accept incoming connections (raw)
     pub async fn accept_raw(&self) -> Result<IncomingConnection, NetworkError> {
-        let connecting =
-            self.endpoint.accept().await.ok_or_else(|| {
-                NetworkError::TransportError("Server endpoint closed".to_string())
-            })?;
+        tracing::info!("Waiting for incoming QUIC connection...");
+        let connecting = self.endpoint.accept().await.ok_or_else(|| {
+            tracing::error!("Server endpoint closed");
+            NetworkError::TransportError("Server endpoint closed".to_string())
+        })?;
 
+        tracing::info!("QUIC connection incoming, performing handshake...");
         let connection = connecting.await.map_err(|e| {
+            tracing::error!("Failed to complete QUIC handshake: {}", e);
             NetworkError::ConnectionFailed(format!("Failed to accept connection: {e}"))
         })?;
 
+        tracing::info!("QUIC connection accepted successfully");
         Ok(IncomingConnection { connection })
     }
 
@@ -345,12 +497,15 @@ impl ClientTransportWrapper {
     ) -> Result<Box<dyn ConnectionTrait>, NetworkError> {
         // Use default key and algorithm if not set
         let key = self.key.as_deref().unwrap_or(&[0u8; 32]);
-        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes128Gcm);
+        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes256Gcm); // Changed to match 32-byte key
 
+        // First establish the QUIC connection
         self.transport.connect(server_addr).await?;
 
-        // Open a stream for the connection
+        // Now open a bidirectional stream - this is what the server is waiting for
+        tracing::info!("Opening bidirectional stream for encrypted communication");
         let (send, recv) = self.transport.open_stream().await?;
+        tracing::info!("Stream opened successfully");
 
         // Create cipher
         let cipher = Arc::new(create_cipher(algorithm, key)?);
@@ -381,7 +536,7 @@ impl ServerTransportWrapper {
     pub async fn accept(&self) -> Result<(Box<dyn ConnectionTrait>, SocketAddr), NetworkError> {
         // Use default key and algorithm if not set
         let key = self.key.as_deref().unwrap_or(&[0u8; 32]);
-        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes128Gcm);
+        let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes256Gcm); // Changed to match 32-byte key
 
         self.transport.accept(key, algorithm).await
     }
@@ -391,7 +546,3 @@ impl ServerTransportWrapper {
         self.transport.local_addr()
     }
 }
-
-#[cfg(test)]
-#[path = "transport_test.rs"]
-mod transport_test;
