@@ -6,7 +6,6 @@ members = [
     "crates/rosh-terminal",
     "crates/rosh-state",
     "crates/rosh-pty",
-    "crates/rosh-test-utils",
 ]
 resolver = "2"
 

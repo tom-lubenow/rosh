@@ -14,29 +14,10 @@ name = "rosh-server"
 path = "src/bin/rosh-server.rs"
 
 [dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
-clap = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-rosh-crypto = { path = "../rosh-crypto", features = ["clap", "rkyv"] }
-rosh-network = { path = "../rosh-network" }
-rosh-terminal = { path = "../rosh-terminal" }
-rosh-state = { path = "../rosh-state", features = ["clap"] }
-rosh-pty = { path = "../rosh-pty" }
-uuid = { version = "1.8", features = ["v4"] }
-crossterm = "0.27"
 base64 = { workspace = true }
-rkyv = { workspace = true }
-rcgen = "0.11"
 rand = "0.8"
-libc = "0.2"
-serde = { workspace = true }
-serde_json = { workspace = true }
-tempfile = "3.10"
 
 [dev-dependencies]
 dirs = "5.0"
 async-trait = "0.1"
-rosh-test-utils = { path = "../rosh-test-utils" }
 futures = "0.3"
