@@ -49,7 +49,7 @@ struct Args {
     key: Option<String>,
 
     /// Cipher algorithm to use
-    #[arg(short = 'a', long, value_enum, default_value = "aes-gcm")]
+    #[arg(short = 'a', long, value_enum, default_value = "aes-256-gcm")]
     cipher: CipherAlgorithm,
 
     /// Enable compression
@@ -65,7 +65,7 @@ struct Args {
     log_level: LogLevel,
 
     /// Alias for --log-level debug
-    #[arg(long, short, conflicts_with = "log_leveL")]
+    #[arg(long, short, conflicts_with = "log_level")]
     debug: bool,
 
     /// Enable predictive echo
@@ -107,6 +107,10 @@ struct Args {
     /// Act as a fake proxy for SSH ProxyCommand (internal use)
     #[arg(long, hide = true)]
     fake_proxy: bool,
+
+    /// UDP test mode - just send/receive test packets
+    #[arg(long, hide = true)]
+    udp_test: bool,
 }
 
 /// Terminal UI state
@@ -339,6 +343,54 @@ pub fn parse_server_arg(server: &str) -> (bool, Option<String>, String) {
     (false, None, server.to_string())
 }
 
+/// Run UDP test client
+async fn run_udp_test_client(server_addr: SocketAddr) -> Result<()> {
+    use tokio::net::UdpSocket;
+    use tokio::time::{interval, Duration};
+
+    println!("Starting UDP test client to {server_addr}");
+
+    // Bind to any available port
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    println!("Local address: {}", socket.local_addr()?);
+
+    // Send test packets periodically
+    let mut count = 0;
+    let mut ticker = interval(Duration::from_secs(1));
+
+    loop {
+        ticker.tick().await;
+        count += 1;
+
+        let msg = format!("Test packet {count}");
+        println!("Sending: {msg}");
+
+        socket.send_to(msg.as_bytes(), server_addr).await?;
+
+        // Try to receive response with timeout
+        let mut buf = vec![0u8; 1024];
+        match tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, peer))) => {
+                let response = String::from_utf8_lossy(&buf[..n]);
+                println!("Received from {peer}: {response}");
+            }
+            Ok(Err(e)) => {
+                println!("Receive error: {e}");
+            }
+            Err(_) => {
+                println!("Timeout waiting for response");
+            }
+        }
+
+        if count >= 5 {
+            println!("Test complete");
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Run fake proxy mode for SSH ProxyCommand
 async fn run_fake_proxy(host: &str, port: &str, family: NetworkFamily) -> Result<()> {
     use std::io::{self, Read, Write as IoWrite};
@@ -509,6 +561,16 @@ pub async fn run() -> Result<()> {
         .with_target(false)
         .init();
 
+    // Check if we're in UDP test mode
+    if args.udp_test {
+        // Parse server address for UDP test
+        let server_addr: SocketAddr = args
+            .server
+            .parse()
+            .with_context(|| format!("Failed to parse server address: {}", args.server))?;
+        return run_udp_test_client(server_addr).await;
+    }
+
     // Parse server argument
     let (is_ssh, user, host) = parse_server_arg(&args.server);
 
@@ -593,13 +655,46 @@ pub async fn run() -> Result<()> {
         .decode(&session_key_str)
         .context("Failed to decode session key")?;
 
-    // Skip hole punching - QUIC handles NAT traversal through its own mechanisms
-    // The initial QUIC handshake packets will punch through NAT naturally
-    if is_ssh {
-        info!("Skipping explicit UDP hole punch - QUIC will handle NAT traversal");
-        // Give server a moment to fully initialize after detaching
+    // Perform UDP hole punching if coming from SSH
+    // HACK/WORKAROUND: Quinn (QUIC implementation) requires specific socket options
+    // that are difficult to set on a pre-existing socket. So we:
+    // 1. Create a regular UDP socket for hole punching
+    // 2. Send packets to punch through NAT
+    // 3. Close the socket
+    // 4. Let Quinn create a new socket on the same port with proper options
+    // This ensures NAT mappings are established while allowing Quinn to work correctly.
+    // TODO: Investigate if Quinn can be modified to accept pre-configured sockets
+    let local_addr = if is_ssh {
+        info!("Performing UDP hole punch to {}", server_addr);
+
+        // Create UDP socket for hole punching
+        let hole_punch_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+        let local_addr = hole_punch_socket.local_addr()?;
+        info!("Hole punch socket bound to {}", local_addr);
+
+        // Send a few packets to punch through NAT
+        for i in 0..3 {
+            let msg = format!("HOLE_PUNCH_{i}");
+            hole_punch_socket
+                .send_to(msg.as_bytes(), server_addr)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        info!("Sent hole punch packets");
+
+        // Wait a bit for server to be ready
         tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+
+        // Close the hole punch socket
+        drop(hole_punch_socket);
+
+        // Small delay to ensure socket is fully closed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Some(local_addr)
+    } else {
+        None
+    };
 
     // Derive session keys
     let mut key_derivation = KeyDerivation::new(&key_bytes);
@@ -625,30 +720,85 @@ pub async fn run() -> Result<()> {
         cert_validation: rosh_network::CertValidationMode::default(),
     };
 
+    // First, let's verify basic UDP connectivity
+    info!("Testing basic UDP connectivity to {}", server_addr);
+    let test_socket = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+    test_socket
+        .send_to(b"UDP_CONNECTIVITY_TEST", server_addr)
+        .await?;
+    info!("Sent UDP test packet");
+
+    // Try to receive a response (server might not echo, but at least we know we can send)
+    let mut buf = vec![0u8; 1024];
+    match tokio::time::timeout(Duration::from_millis(500), test_socket.recv_from(&mut buf)).await {
+        Ok(Ok((n, peer))) => {
+            info!("Received UDP response: {} bytes from {}", n, peer);
+        }
+        Ok(Err(e)) => {
+            warn!("UDP receive error: {}", e);
+        }
+        Err(_) => {
+            info!("No UDP response received (this is normal if server doesn't echo)");
+        }
+    }
+    drop(test_socket);
+
     // Connect to server
     debug!("Creating QUIC network transport");
 
-    // Create transport
-    let mut transport = NetworkTransport::new_client(transport_config).await?;
+    // Create transport - use hole-punched address if available
+    let transport = if let Some(addr) = local_addr {
+        info!(
+            "Creating QUIC client transport at hole-punched address: {}",
+            addr
+        );
+        NetworkTransport::new_client_at_address(addr, transport_config).await?
+    } else {
+        info!("Creating QUIC client transport with random port");
+        NetworkTransport::new_client(transport_config).await?
+    };
+    info!("Created QUIC client transport");
+
+    // Set encryption key on transport
+    let mut transport = transport.with_encryption(key_bytes.to_vec(), args.cipher);
+    info!("Configured transport with encryption");
 
     info!("Establishing QUIC connection to {}", server_addr);
+    info!(
+        "Server address details: IP={}, Port={}",
+        server_addr.ip(),
+        server_addr.port()
+    );
+
+    // Add more detailed timeout handling
+    let start_time = std::time::Instant::now();
     let mut connection =
-        match time::timeout(Duration::from_secs(5), transport.connect(server_addr)).await {
+        match time::timeout(Duration::from_secs(10), transport.connect(server_addr)).await {
             Ok(Ok(conn)) => {
-                info!("QUIC connection established successfully");
+                info!(
+                    "QUIC connection established successfully in {:?}",
+                    start_time.elapsed()
+                );
                 conn
             }
             Ok(Err(e)) => {
+                error!(
+                    "QUIC connection failed after {:?}: {}",
+                    start_time.elapsed(),
+                    e
+                );
+                error!("Error details: {:?}", e);
                 if let Some(ref log_path) = log_file {
                     retrieve_server_logs(&host, log_path).await;
                 }
                 anyhow::bail!("Failed to connect to Rosh server: {}", e)
             }
             Err(_) => {
+                error!("QUIC connection timeout after {:?}", start_time.elapsed());
                 if let Some(ref log_path) = log_file {
                     retrieve_server_logs(&host, log_path).await;
                 }
-                anyhow::bail!("QUIC connection timeout after 5 seconds")
+                anyhow::bail!("QUIC connection timeout after 10 seconds")
             }
         };
 

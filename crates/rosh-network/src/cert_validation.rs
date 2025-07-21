@@ -3,6 +3,11 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use std::sync::Arc;
 
+/// Install the default crypto provider for QUIC/TLS
+pub fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Certificate validation mode for Rosh
 #[derive(Debug, Clone, Default)]
 pub enum CertValidationMode {

@@ -640,7 +640,7 @@ pub mod server {
     use super::*;
     use std::io::Write;
     use std::net::UdpSocket;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     /// Detach from parent process without communicating params
     /// This is called AFTER params have already been printed to stdout
@@ -656,16 +656,20 @@ pub mod server {
             match unsafe { libc::fork() } {
                 -1 => anyhow::bail!("Failed to fork: {}", std::io::Error::last_os_error()),
                 0 => {
-                    // Child process - redirect stderr to a debug file
-                    if let Ok(debug_file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/rosh-server-debug.log")
-                    {
-                        use std::os::unix::io::AsRawFd;
-                        unsafe {
-                            libc::dup2(debug_file.as_raw_fd(), 2);
-                        }
+                    // Child process - don't redirect stdout/stderr here
+                    // Let the server code handle its own logging
+
+                    // Write a debug message immediately to confirm we're alive
+                    std::fs::write("/tmp/rosh-child-alive.txt", "Child process started\n").ok();
+
+                    // Detach from parent's process group to avoid SIGHUP
+                    unsafe {
+                        libc::setsid();
+                    }
+
+                    // Close stdin to detach from terminal
+                    unsafe {
+                        libc::close(0);
                     }
 
                     // Continue execution

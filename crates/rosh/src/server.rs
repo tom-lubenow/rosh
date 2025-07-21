@@ -19,6 +19,53 @@ use tokio::time;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+// Helper to append debug messages to file
+fn debug_log(msg: &str) {
+    use std::io::Write as IoWrite;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/rosh-server-debug.log")
+    {
+        let _ = writeln!(f, "{msg}");
+        let _ = f.flush();
+    }
+}
+
+/// Run a simple UDP echo server for testing connectivity
+async fn run_udp_test_server(
+    bound_addr: SocketAddr,
+    socket: Option<std::net::UdpSocket>,
+) -> Result<()> {
+    println!("UDP_TEST_SERVER {bound_addr}");
+
+    let socket = if let Some(s) = socket {
+        s
+    } else {
+        std::net::UdpSocket::bind(bound_addr)?
+    };
+
+    // Convert to tokio UdpSocket
+    socket.set_nonblocking(true)?;
+    let socket = tokio::net::UdpSocket::from_std(socket)?;
+
+    println!("UDP test server listening on {}", socket.local_addr()?);
+
+    let mut buf = vec![0u8; 1024];
+    loop {
+        match socket.recv_from(&mut buf).await {
+            Ok((n, peer)) => {
+                println!("Received {n} bytes from {peer}");
+                let response = format!("ECHO: {}", String::from_utf8_lossy(&buf[..n]));
+                socket.send_to(response.as_bytes(), peer).await?;
+            }
+            Err(e) => {
+                eprintln!("UDP receive error: {e}");
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 enum LogLevel {
     Trace,
@@ -44,7 +91,7 @@ struct Args {
     key: Option<PathBuf>,
 
     /// Cipher algorithm to use
-    #[arg(short = 'a', long, value_enum, default_value = "aes-gcm")]
+    #[arg(short = 'a', long, value_enum, default_value = "aes-256-gcm")]
     cipher: CipherAlgorithm,
 
     /// Enable compression
@@ -78,6 +125,10 @@ struct Args {
     /// Path to log file (stdout if not specified)
     #[arg(long)]
     log_file: Option<PathBuf>,
+
+    /// UDP test mode - just echo packets
+    #[arg(long, hide = true)]
+    udp_test: bool,
 }
 
 /// Active session state
@@ -131,10 +182,13 @@ async fn run_server_after_fork(
     log_file_path: PathBuf,
     socket: Option<std::net::UdpSocket>,
 ) -> Result<()> {
-    // Debug output to stderr before logging is set up
-    eprintln!("DEBUG: run_server_after_fork called");
-    eprintln!("DEBUG: bound_addr = {bound_addr}");
-    eprintln!("DEBUG: log_file_path = {}", log_file_path.display());
+    // Write debug output to file instead of stderr
+    debug_log("DEBUG: run_server_after_fork called");
+    debug_log(&format!("DEBUG: bound_addr = {bound_addr}"));
+    debug_log(&format!(
+        "DEBUG: log_file_path = {}",
+        log_file_path.display()
+    ));
 
     // Set up logging
     let log_level = tracing::Level::INFO;
@@ -144,7 +198,7 @@ async fn run_server_after_fork(
         .open(&log_file_path)
         .with_context(|| format!("Failed to open log file: {}", log_file_path.display()))?;
 
-    eprintln!("DEBUG: Log file opened successfully");
+    debug_log("DEBUG: Log file opened successfully");
 
     tracing_subscriber::fmt()
         .with_max_level(log_level)
@@ -152,7 +206,7 @@ async fn run_server_after_fork(
         .with_ansi(false)
         .init();
 
-    eprintln!("DEBUG: Logging initialized");
+    debug_log("DEBUG: Logging initialized");
 
     info!(
         "Rosh server starting up (after fork), log file: {}",
@@ -160,8 +214,13 @@ async fn run_server_after_fork(
     );
     info!("Server args: {:?}", args);
 
-    // Continue with the actual server logic
-    run_server(args, bound_addr, session_key, log_file_path, socket).await
+    // Check if we're in UDP test mode
+    if args.udp_test {
+        run_udp_test_server(bound_addr, socket).await
+    } else {
+        // Continue with the actual server logic
+        run_server(args, bound_addr, session_key, log_file_path, socket).await
+    }
 }
 
 /// Run the actual server after forking/detaching
@@ -211,31 +270,78 @@ async fn run_server(
     drop(ready_rx);
 
     // Create network transport
+    // HACK: If we have a socket from hole punching, we need to close it and let QUIC
+    // recreate it on the same port. This is because Quinn needs specific socket options
+    // that we can't easily set on a pre-existing socket.
     let transport = if let Some(socket) = socket {
         info!(
-            "Creating NetworkTransport from existing socket on {}",
+            "Closing hole-punch socket and recreating for QUIC on {}",
             bound_addr
         );
-        // Use the existing socket instead of dropping it
-        match NetworkTransport::new_server_from_socket(socket, transport_config).await {
-            Ok(t) => {
-                info!("NetworkTransport created successfully");
-                // In one-shot mode, set the session key
-                if let Some(ref key) = session_key {
-                    t.with_encryption(key.clone(), args.cipher)
-                } else {
-                    t
-                }
+        // Close the hole punching socket
+        drop(socket);
+
+        // Small delay to ensure socket is fully closed
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Create new QUIC transport on the same address
+        info!(
+            "Creating NetworkTransport on {} (after hole punch)",
+            bound_addr
+        );
+
+        // First, let's verify we can receive UDP packets on this port
+        info!(
+            "Testing UDP reception on {} before creating QUIC endpoint",
+            bound_addr
+        );
+        let test_socket = std::net::UdpSocket::bind(bound_addr)?;
+        test_socket.set_nonblocking(true)?;
+        let test_socket = tokio::net::UdpSocket::from_std(test_socket)?;
+
+        // Try to receive for a short time
+        let mut buf = vec![0u8; 1024];
+        match tokio::time::timeout(Duration::from_secs(2), test_socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, peer))) => {
+                info!(
+                    "Received {} bytes from {} during UDP test: {:?}",
+                    n,
+                    peer,
+                    String::from_utf8_lossy(&buf[..n])
+                );
             }
-            Err(e) => {
-                error!("Failed to create NetworkTransport: {}", e);
-                return Err(e.into());
+            Ok(Err(e)) => {
+                warn!("UDP receive error during test: {}", e);
             }
+            Err(_) => {
+                info!("No UDP packets received during 2 second test window");
+            }
+        }
+
+        // Close test socket
+        drop(test_socket);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let t = NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config)
+            .await?;
+        match t.local_addr() {
+            Ok(addr) => info!("QUIC endpoint listening on: {}", addr),
+            Err(e) => error!("Failed to get QUIC endpoint address: {}", e),
+        }
+        // In one-shot mode, set the session key
+        if let Some(ref key) = session_key {
+            t.with_encryption(key.clone(), args.cipher)
+        } else {
+            t
         }
     } else {
         info!("Creating NetworkTransport on {}", bound_addr);
         let t = NetworkTransport::new_server(bound_addr, cert_chain, private_key, transport_config)
             .await?;
+        match t.local_addr() {
+            Ok(addr) => info!("QUIC endpoint listening on: {}", addr),
+            Err(e) => error!("Failed to get QUIC endpoint address: {}", e),
+        }
         // In one-shot mode, set the session key
         if let Some(ref key) = session_key {
             t.with_encryption(key.clone(), args.cipher)
@@ -392,31 +498,78 @@ pub fn main() -> Result<()> {
         std::io::stdout().flush()?;
 
         // NOW detach
+        // Don't print to stderr before fork - it interferes with SSH ProxyCommand
+        std::fs::write("/tmp/rosh-pre-fork.txt", "About to fork\n").ok();
+
+        // Close the socket before forking - we'll recreate it after
+        drop(socket);
+
         bootstrap::server::detach_without_params()?;
 
-        // After forking, create the tokio runtime and run the server
-        eprintln!("DEBUG: Creating tokio runtime after fork");
-        let runtime = match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
+        // After forking, we're in the child process
+        debug_log("DEBUG: Child process alive after detach_without_params");
+
+        // Try creating a single-threaded runtime which might work better after fork
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => {
+                debug_log("DEBUG: Tokio runtime created successfully");
+                rt
+            }
             Err(e) => {
-                eprintln!("ERROR: Failed to create tokio runtime: {e}");
-                return Err(e.into());
+                debug_log(&format!("ERROR: Failed to create tokio runtime: {e}"));
+                debug_log(&format!("ERROR: Details: {e:?}"));
+                // Try multi-threaded as fallback
+                match tokio::runtime::Runtime::new() {
+                    Ok(rt) => {
+                        debug_log("DEBUG: Fallback to multi-threaded runtime succeeded");
+                        rt
+                    }
+                    Err(e2) => {
+                        debug_log(&format!("ERROR: Fallback also failed: {e2}"));
+                        return Err(e.into());
+                    }
+                }
             }
         };
-        eprintln!("DEBUG: Tokio runtime created, running server");
+        debug_log("DEBUG: About to run server");
 
-        let result = runtime.block_on(run_server_after_fork(
-            args,
-            bound_addr,
-            Some(session_key),
-            log_file_path,
-            Some(socket),
-        ));
+        // Wrap in catch_unwind to catch panics
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(run_server_after_fork(
+                args,
+                bound_addr,
+                Some(session_key),
+                log_file_path,
+                None, // Socket was closed before fork, will be recreated
+            ))
+        }));
 
-        if let Err(ref e) = result {
-            eprintln!("ERROR: Server failed: {e}");
+        match result {
+            Ok(inner_result) => {
+                debug_log(&format!(
+                    "DEBUG: Server finished with result: {:?}",
+                    inner_result.is_ok()
+                ));
+                if let Err(ref e) = inner_result {
+                    debug_log(&format!("ERROR: Server failed: {e}"));
+                }
+                inner_result
+            }
+            Err(panic) => {
+                debug_log("ERROR: Server panicked!");
+                if let Some(s) = panic.downcast_ref::<&str>() {
+                    debug_log(&format!("ERROR: Panic message: {s}"));
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    debug_log(&format!("ERROR: Panic message: {s}"));
+                } else {
+                    debug_log("ERROR: Unknown panic type");
+                }
+                Err(anyhow::anyhow!("Server panicked"))
+            }
         }
-        result
     } else {
         // Normal case - create runtime and run
         let runtime = tokio::runtime::Runtime::new()?;
@@ -558,8 +711,13 @@ async fn run() -> Result<()> {
 
     info!("Detach complete, continuing server initialization");
 
-    // Now run the actual server with the bound address
-    run_server(args, bound_addr, session_key, log_file_path, socket).await
+    // Check if we're in UDP test mode
+    if args.udp_test {
+        run_udp_test_server(bound_addr, socket).await
+    } else {
+        // Now run the actual server with the bound address
+        run_server(args, bound_addr, session_key, log_file_path, socket).await
+    }
 }
 
 async fn handle_connection(

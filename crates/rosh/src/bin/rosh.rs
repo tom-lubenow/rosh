@@ -1,5 +1,8 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install default crypto provider for QUIC/TLS
+    rosh_network::cert_validation::install_crypto_provider();
+
     // Run the client and ensure proper terminal cleanup on exit
     let result = rosh::client::run().await;
 
