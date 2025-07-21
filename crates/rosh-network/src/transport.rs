@@ -499,10 +499,13 @@ impl ClientTransportWrapper {
         let key = self.key.as_deref().unwrap_or(&[0u8; 32]);
         let algorithm = self.algorithm.unwrap_or(CipherAlgorithm::Aes256Gcm); // Changed to match 32-byte key
 
+        // First establish the QUIC connection
         self.transport.connect(server_addr).await?;
 
-        // Open a stream for the connection
+        // Now open a bidirectional stream - this is what the server is waiting for
+        tracing::info!("Opening bidirectional stream for encrypted communication");
         let (send, recv) = self.transport.open_stream().await?;
+        tracing::info!("Stream opened successfully");
 
         // Create cipher
         let cipher = Arc::new(create_cipher(algorithm, key)?);

@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let server_addr: SocketAddr = "127.0.0.1:4433".parse()?;
+    let server_addr: SocketAddr = "127.0.0.1:2022".parse()?;
     
     // Skip certificate validation for testing
     #[derive(Debug)]

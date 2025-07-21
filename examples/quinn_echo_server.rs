@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let addr: SocketAddr = "127.0.0.1:4433".parse()?;
+    let addr: SocketAddr = "127.0.0.1:2022".parse()?;
     
     // Generate self-signed certificate
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
